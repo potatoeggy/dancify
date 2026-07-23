@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: dancify
+      POSTGRES_USER: dancify
+      POSTGRES_PASSWORD: dancify
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dancify"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://dancify:dancify@db:5432/dancify
+      SECRET_KEY: local-compose-only
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+
+volumes:
+  postgres-data:
