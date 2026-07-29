@@ -11,3 +11,4 @@ build/
 *.egg-info/
 *.db
 .env
+498_video_ingestion/

@@ -118,6 +118,33 @@ class RawImuSample:
 
 
 @dataclass(frozen=True, slots=True)
+class RawMotionSample:
+    """One explicitly assigned capture sample at the HTTP trust boundary."""
+
+    wrist: WristSide
+    capture_timestamp_us: int
+    client_timestamp: float
+    packet_number: int
+    acceleration_g: Vector3
+    angular_velocity_dps: Vector3
+
+    def __post_init__(self) -> None:
+        if self.capture_timestamp_us < 0 or self.packet_number < 0:
+            raise ValueError("capture timestamp and packet number must be non-negative")
+        if not isfinite(self.client_timestamp) or self.client_timestamp < 0:
+            raise ValueError("clientTimestamp must be finite and non-negative")
+
+    def raw_sample(self) -> RawImuSample:
+        return RawImuSample(
+            self.wrist.value,
+            self.capture_timestamp_us,
+            self.packet_number,
+            self.acceleration_g,
+            self.angular_velocity_dps,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MotionFeatures:
     synchronized_time: float
     wrist: WristSide
@@ -204,6 +231,7 @@ class GameSession:
     cumulative_score: float = 0.0
     event_sequence: int = 0
     scored_windows: set[int] = field(default_factory=set[int])
+    score_results: dict[int, ScoreResult] = field(default_factory=dict[int, ScoreResult])
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -216,4 +244,5 @@ class GameSession:
             "current_window": self.current_window,
             "cumulative_score": self.cumulative_score,
             "event_sequence": self.event_sequence,
+            "scores": [self.score_results[index].to_dict() for index in sorted(self.score_results)],
         }

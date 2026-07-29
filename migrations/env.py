@@ -7,8 +7,10 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from dancify import models  # noqa: F401
+from dancify.environment import load_environment
 from dancify.extensions import Base
 
+load_environment()
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

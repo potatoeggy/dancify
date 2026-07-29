@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from math import isfinite
+from threading import RLock
 from time import monotonic
 from typing import Any, cast
 from uuid import uuid4
 
 from dancify.calibration import (
     AffineClockMapper,
+    CaptureClockMapper,
     ClockObservation,
     SpatialCalibrationProfile,
     TimingCalibrationService,
@@ -20,6 +23,7 @@ from dancify.domain import (
     MotionFeatures,
     MotionWindow,
     RawImuSample,
+    RawMotionSample,
     ScoreResult,
     SessionState,
     Vector3,
@@ -52,13 +56,58 @@ class ConflictError(ValueError):
 
 
 @dataclass(slots=True)
+class WristStreamHealth:
+    accepted: int = 0
+    dropped: int = 0
+    duplicates: int = 0
+    out_of_order: int = 0
+    invalid_timing: int = 0
+
+    def snapshot(self) -> dict[str, object]:
+        attempted = self.accepted + self.dropped
+        return {
+            "accepted": self.accepted,
+            "dropped": self.dropped,
+            "duplicates": self.duplicates,
+            "outOfOrder": self.out_of_order,
+            "invalidTiming": self.invalid_timing,
+            "quality": self.accepted / attempted if attempted else 1.0,
+        }
+
+
+@dataclass(slots=True)
 class SessionRuntime:
     scorer: ScoringAlgorithm
     windowing: FixedWindowingStrategy = field(default_factory=FixedWindowingStrategy)
     aggregator: ArithmeticMeanScoreAggregator = field(default_factory=ArithmeticMeanScoreAggregator)
     clock_mapper: AffineClockMapper = field(default_factory=AffineClockMapper)
-    spatial_profile: SpatialCalibrationProfile | None = None
+    spatial_profiles: dict[WristSide, SpatialCalibrationProfile] = field(
+        default_factory=dict[WristSide, SpatialCalibrationProfile]
+    )
+    calibration_version: int = 0
+    capture_mappers: dict[WristSide, CaptureClockMapper] = field(
+        default_factory=lambda: {side: CaptureClockMapper() for side in WristSide}
+    )
+    raw_health: dict[WristSide, WristStreamHealth] = field(
+        default_factory=lambda: {side: WristStreamHealth() for side in WristSide}
+    )
+    last_packet: dict[WristSide, int] = field(default_factory=dict[WristSide, int])
+    malformed_samples: int = 0
     performance: list[MotionFeatures] = field(default_factory=list[MotionFeatures])
+    lock: RLock = field(default_factory=RLock)
+
+    def motion_health(self) -> dict[str, object]:
+        wrists = {side.value: self.raw_health[side].snapshot() for side in WristSide}
+        accepted = sum(self.raw_health[side].accepted for side in WristSide)
+        dropped = self.malformed_samples + sum(self.raw_health[side].dropped for side in WristSide)
+        attempted = accepted + dropped
+        return {
+            "accepted": accepted,
+            "dropped": dropped,
+            "malformed": self.malformed_samples,
+            "quality": accepted / attempted if attempted else 1.0,
+            "wrists": wrists,
+        }
 
 
 class RoutineService:
@@ -101,13 +150,17 @@ class GameplaySessionService:
         summaries: SessionSummaryRepository | None = None,
         clock: Callable[[], float] = monotonic,
         sample_rate_hz: int = 50,
+        max_raw_batch: int = 1000,
     ) -> None:
+        if sample_rate_hz <= 0 or max_raw_batch <= 0:
+            raise ValueError("sample rate and raw batch limit must be positive")
         self._routines = routines
         self._scorers = scorers
         self._publisher = publisher
         self._summaries = summaries or SessionSummaryRepository()
         self._clock = clock
         self._sample_rate_hz = sample_rate_hz
+        self._max_raw_batch = max_raw_batch
         self._sessions: dict[str, GameSession] = {}
         self._runtime: dict[str, SessionRuntime] = {}
 
@@ -127,8 +180,18 @@ class GameplaySessionService:
         except KeyError as exc:
             raise NotFoundError(f"session not found: {session_id}") from exc
 
+    def server_timestamp(self) -> float:
+        return self._clock()
+
     def snapshot(self, session_id: str) -> dict[str, object]:
-        return self.get(session_id).snapshot()
+        session = self.get(session_id)
+        runtime = self._runtime[session_id]
+        with runtime.lock:
+            snapshot = session.snapshot()
+            snapshot["calibrationVersion"] = runtime.calibration_version
+            snapshot["activeWrists"] = [side.value for side in WristSide if side in runtime.spatial_profiles]
+            snapshot["motionHealth"] = runtime.motion_health()
+            return snapshot
 
     def calibrate(
         self,
@@ -137,53 +200,86 @@ class GameplaySessionService:
         neutral: list[Vector3],
         upward: list[Vector3],
         outward: list[Vector3],
+        *,
+        calibration_version: int = 1,
+        wrist_gestures: Mapping[WristSide, tuple[list[Vector3], list[Vector3], list[Vector3]]] | None = None,
     ) -> dict[str, object]:
         session = self.get(session_id)
-        if session.state == SessionState.CREATED:
-            self._transition(session, SessionState.CALIBRATING)
-        if session.state != SessionState.CALIBRATING:
-            raise ConflictError("session must be calibrating")
-        offset = TimingCalibrationService.estimate_offset(observations)
         runtime = self._runtime[session_id]
-        runtime.clock_mapper = AffineClockMapper(offset_seconds=offset)
-        runtime.spatial_profile = SpatialCalibrationProfile.from_gestures(neutral, upward, outward, self._clock())
-        self._transition(session, SessionState.READY)
-        result: dict[str, object] = {
-            "timingOffsetSeconds": offset,
-            "horizontalConfidence": runtime.spatial_profile.horizontal_confidence,
-        }
-        self._emit(session, "calibration.result", result)
-        return result
+        with runtime.lock:
+            if session.state == SessionState.CREATED:
+                self._transition(session, SessionState.CALIBRATING)
+            if session.state != SessionState.CALIBRATING:
+                raise ConflictError("session must be calibrating")
+            if calibration_version not in {1, 2}:
+                raise ValueError("calibration schemaVersion must be 1 or 2")
+            offset = TimingCalibrationService.estimate_offset(observations)
+            calibrated_at = self._clock()
+            if calibration_version == 1:
+                gestures = (neutral, upward, outward)
+                profiles = {
+                    side: SpatialCalibrationProfile.from_gestures(*gestures, calibrated_at) for side in WristSide
+                }
+            else:
+                if wrist_gestures is None:
+                    raise ValueError("schemaVersion 2 calibration requires right or left and right wrists")
+                wrist_set = set(wrist_gestures)
+                if WristSide.RIGHT not in wrist_set or wrist_set - set(WristSide):
+                    raise ValueError("schemaVersion 2 calibration requires right or left and right wrists")
+                profiles = {
+                    side: SpatialCalibrationProfile.from_gestures(*wrist_gestures[side], calibrated_at)
+                    for side in WristSide
+                    if side in wrist_gestures
+                }
+            runtime.clock_mapper = AffineClockMapper(offset_seconds=offset)
+            runtime.spatial_profiles = profiles
+            runtime.calibration_version = calibration_version
+            self._transition(session, SessionState.READY)
+            confidence = min(profile.horizontal_confidence for profile in profiles.values())
+            result: dict[str, object] = {
+                "timingOffsetSeconds": offset,
+                "horizontalConfidence": confidence,
+            }
+            if calibration_version == 2:
+                result.update(
+                    {
+                        "schemaVersion": 2,
+                        "wrists": {
+                            side.value: {"horizontalConfidence": profiles[side].horizontal_confidence}
+                            for side in WristSide
+                            if side in profiles
+                        },
+                    }
+                )
+            self._emit(session, "calibration.result", result)
+            return result
 
     def start(self, session_id: str, delay_seconds: float = 1.0) -> dict[str, object]:
         session = self.get(session_id)
-        if session.state != SessionState.READY:
-            raise ConflictError("session must be ready before playback starts")
-        if delay_seconds < 0:
-            raise ValueError("delaySeconds must be non-negative")
-        session.playback_start_time = self._clock() + delay_seconds
-        self._transition(session, SessionState.SCHEDULED)
-        payload: dict[str, object] = {"startAt": session.playback_start_time}
-        self._emit(session, "playback.scheduled", payload)
-        return payload
+        runtime = self._runtime[session_id]
+        with runtime.lock:
+            if session.state != SessionState.READY:
+                raise ConflictError("session must be ready before playback starts")
+            if not isfinite(delay_seconds) or delay_seconds < 0:
+                raise ValueError("delaySeconds must be finite and non-negative")
+            session.playback_start_time = self._clock() + delay_seconds
+            self._transition(session, SessionState.SCHEDULED)
+            payload: dict[str, object] = {"startAt": session.playback_start_time}
+            self._emit(session, "playback.scheduled", payload)
+            return payload
 
     def ingest_features(self, session_id: str, features: list[MotionFeatures]) -> int:
         session = self.get(session_id)
-        if session.state not in {
-            SessionState.SCHEDULED,
-            SessionState.PLAYING,
-            SessionState.PAUSED,
-        }:
-            raise ConflictError("session is not accepting motion")
         runtime = self._runtime[session_id]
-        runtime.performance.extend(features)
-        runtime.performance.sort(key=lambda item: (item.synchronized_time, item.wrist.value))
-        return len(features)
+        with runtime.lock:
+            self._require_motion_state(session)
+            runtime.performance.extend(features)
+            runtime.performance.sort(key=lambda item: (item.synchronized_time, item.wrist.value))
+            return len(features)
 
     def ingest_raw_samples(self, session_id: str, samples: list[RawImuSample]) -> int:
-        """Translate capture-port output without exposing hardware details to scoring."""
+        """Translate legacy capture-port output; HTTP raw uploads require explicit wrists."""
         runtime = self._runtime[self.get(session_id).id]
-        profile = self.calibration_profile(session_id)
         features: list[MotionFeatures] = []
         for sample in samples:
             lowered = sample.device_id.lower()
@@ -193,60 +289,153 @@ class GameplaySessionService:
                 wrist = WristSide.RIGHT
             else:
                 raise ValueError("device_id must identify the left or right wrist")
-            features.append(profile.translate(sample, wrist, runtime.clock_mapper))
+            features.append(self.calibration_profile(session_id, wrist).translate(sample, wrist, runtime.clock_mapper))
         return self.ingest_features(session_id, features)
+
+    def ingest_raw_motion(
+        self,
+        session_id: str,
+        samples: list[tuple[int, RawMotionSample]],
+        malformed: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        """Ingest an item-wise tolerant live batch and return authoritative health."""
+        session = self.get(session_id)
+        runtime = self._runtime[session_id]
+        parse_errors = list(malformed or [])
+        if len(samples) + len(parse_errors) > self._max_raw_batch:
+            raise ValueError(f"raw motion batch exceeds limit of {self._max_raw_batch}")
+        with runtime.lock:
+            self._require_motion_state(session)
+            if session.playback_start_time is None:
+                raise ConflictError("playback has not been scheduled")
+            runtime.malformed_samples += len(parse_errors)
+            errors = parse_errors
+            accepted_features: list[MotionFeatures] = []
+            routine = self._routines.get_record(session.routine_id)
+            for index, upload in samples:
+                health = runtime.raw_health[upload.wrist]
+                if upload.wrist not in runtime.spatial_profiles:
+                    health.dropped += 1
+                    errors.append(
+                        {
+                            "index": index,
+                            "code": "uncalibrated_wrist",
+                            "message": f"{upload.wrist.value} wrist is not calibrated",
+                        }
+                    )
+                    continue
+                previous = runtime.last_packet.get(upload.wrist)
+                if previous is not None and upload.packet_number <= previous:
+                    health.dropped += 1
+                    if upload.packet_number == previous:
+                        health.duplicates += 1
+                        code = "duplicate_packet"
+                    else:
+                        health.out_of_order += 1
+                        code = "out_of_order_packet"
+                    errors.append({"index": index, "code": code, "message": code.replace("_", " ")})
+                    continue
+                runtime.last_packet[upload.wrist] = upload.packet_number
+                capture_mapper = runtime.capture_mappers[upload.wrist]
+                client_capture_time = capture_mapper.observe(upload.capture_timestamp_us, upload.client_timestamp)
+                server_capture_time = client_capture_time + runtime.clock_mapper.offset_seconds
+                playback_time = server_capture_time - session.playback_start_time
+                if playback_time < 0 or playback_time > routine.duration_seconds:
+                    health.dropped += 1
+                    health.invalid_timing += 1
+                    code = "before_playback" if playback_time < 0 else "after_playback"
+                    errors.append(
+                        {
+                            "index": index,
+                            "code": code,
+                            "message": "sample capture time is outside the playback interval",
+                        }
+                    )
+                    continue
+                server_mapper = AffineClockMapper(
+                    capture_mapper.scale,
+                    capture_mapper.offset_seconds + runtime.clock_mapper.offset_seconds,
+                )
+                translated = runtime.spatial_profiles[upload.wrist].translate(
+                    upload.raw_sample(), upload.wrist, server_mapper
+                )
+                accepted_features.append(replace(translated, synchronized_time=playback_time))
+                health.accepted += 1
+            runtime.performance.extend(accepted_features)
+            runtime.performance.sort(key=lambda item: (item.synchronized_time, item.wrist.value))
+            motion_health = runtime.motion_health()
+            self._emit(session, "motion.health", {"motionHealth": motion_health})
+            return {
+                "accepted": len(accepted_features),
+                "dropped": len(errors),
+                "errors": errors,
+                "motionHealth": motion_health,
+            }
+
+    @staticmethod
+    def _require_motion_state(session: GameSession) -> None:
+        if session.state not in {SessionState.SCHEDULED, SessionState.PLAYING, SessionState.PAUSED}:
+            raise ConflictError("session is not accepting motion")
 
     def progress(self, session_id: str, video_time: float, server_time: float | None = None) -> list[ScoreResult]:
         session = self.get(session_id)
-        if video_time < 0:
-            raise ValueError("videoTime must be non-negative")
-        now = self._clock() if server_time is None else server_time
-        if session.state == SessionState.SCHEDULED:
-            if session.playback_start_time is None or now < session.playback_start_time:
+        runtime = self._runtime[session_id]
+        with runtime.lock:
+            if not isfinite(video_time) or video_time < 0:
+                raise ValueError("videoTime must be finite and non-negative")
+            if server_time is not None and not isfinite(server_time):
+                raise ValueError("serverTime must be finite")
+            now = self._clock() if server_time is None else server_time
+            if session.state == SessionState.SCHEDULED:
+                if session.playback_start_time is None or now < session.playback_start_time:
+                    return []
+                self._transition(session, SessionState.PLAYING)
+            if session.state not in {SessionState.PLAYING, SessionState.PAUSED}:
+                raise ConflictError("session is not playing")
+            assert session.playback_start_time is not None
+            drift = abs((now - session.playback_start_time) - video_time)
+            if drift > 0.5:
+                if session.state != SessionState.PAUSED:
+                    self._transition(session, SessionState.PAUSED)
+                    self._emit(session, "session.paused", {"reason": "synchronization_lost", "driftSeconds": drift})
                 return []
-            self._transition(session, SessionState.PLAYING)
-        if session.state not in {SessionState.PLAYING, SessionState.PAUSED}:
-            raise ConflictError("session is not playing")
-        assert session.playback_start_time is not None
-        drift = abs((now - session.playback_start_time) - video_time)
-        if drift > 0.5:
-            if session.state != SessionState.PAUSED:
-                self._transition(session, SessionState.PAUSED)
-                self._emit(session, "session.paused", {"reason": "synchronization_lost", "driftSeconds": drift})
-            return []
-        if session.state == SessionState.PAUSED:
-            self._transition(session, SessionState.PLAYING)
-        session.current_timestamp = video_time
-        results = self._score_completed(session)
-        routine = self._routines.get_record(session.routine_id)
-        if video_time >= routine.duration_seconds:
-            self._transition(session, SessionState.COMPLETED)
-            self._summaries.save(session)
-            self._emit(
-                session,
-                "session.completed",
-                {"cumulativeScore": session.cumulative_score, "scoredWindows": len(session.scored_windows)},
-            )
-        return results
+            if session.state == SessionState.PAUSED:
+                self._transition(session, SessionState.PLAYING)
+            session.current_timestamp = video_time
+            results = self._score_completed(session)
+            routine = self._routines.get_record(session.routine_id)
+            if video_time >= routine.duration_seconds:
+                self._transition(session, SessionState.COMPLETED)
+                self._summaries.save(session)
+                self._emit(
+                    session,
+                    "session.completed",
+                    {"cumulativeScore": session.cumulative_score, "scoredWindows": len(session.scored_windows)},
+                )
+            return results
 
     def abort(self, session_id: str) -> GameSession:
         session = self.get(session_id)
-        if session.state in {SessionState.COMPLETED, SessionState.ABORTED}:
-            raise ConflictError("session is already terminal")
-        self._transition(session, SessionState.ABORTED)
-        self._summaries.save(session)
-        return session
+        runtime = self._runtime[session_id]
+        with runtime.lock:
+            if session.state in {SessionState.COMPLETED, SessionState.ABORTED}:
+                raise ConflictError("session is already terminal")
+            self._transition(session, SessionState.ABORTED)
+            self._summaries.save(session)
+            return session
 
-    def calibration_profile(self, session_id: str) -> SpatialCalibrationProfile:
-        profile = self._runtime[self.get(session_id).id].spatial_profile
-        if profile is None:
-            raise ConflictError("session is not calibrated")
-        return profile
+    def calibration_profile(self, session_id: str, wrist: WristSide = WristSide.LEFT) -> SpatialCalibrationProfile:
+        runtime = self._runtime[self.get(session_id).id]
+        try:
+            return runtime.spatial_profiles[wrist]
+        except KeyError as exc:
+            raise ConflictError(f"{wrist.value} wrist is not calibrated") from exc
 
     def _score_completed(self, session: GameSession) -> list[ScoreResult]:
         runtime = self._runtime[session.id]
         routine = self._routines.get_record(session.routine_id)
         raw_reference = deserialize_reference(routine.reference_motion)
+        active_wrists = set(runtime.spatial_profiles)
         results: list[ScoreResult] = []
         for index in runtime.windowing.completed_windows(session.current_timestamp):
             if index in session.scored_windows or index >= len(routine.windows):
@@ -256,19 +445,28 @@ class GameplaySessionService:
             session.current_window = index
             if not window_record.scoreable:
                 continue
-            reference_raw = reference_features(raw_reference, window_record.start_seconds, window_record.end_seconds)
+            reference_raw = tuple(
+                item
+                for item in reference_features(raw_reference, window_record.start_seconds, window_record.end_seconds)
+                if item.wrist in active_wrists
+            )
             reference_samples = resample_features(
                 reference_raw, window_record.start_seconds, window_record.end_seconds, self._sample_rate_hz
             )
             performance_raw = tuple(
                 item
                 for item in runtime.performance
-                if window_record.start_seconds <= item.synchronized_time < window_record.end_seconds
+                if item.wrist in active_wrists
+                and window_record.start_seconds <= item.synchronized_time < window_record.end_seconds
             )
             performance_samples = resample_features(
                 performance_raw, window_record.start_seconds, window_record.end_seconds, self._sample_rate_hz
             )
-            expected = max(1, int((window_record.end_seconds - window_record.start_seconds) * self._sample_rate_hz) * 2)
+            expected = max(
+                1,
+                int((window_record.end_seconds - window_record.start_seconds) * self._sample_rate_hz)
+                * len(active_wrists),
+            )
             coverage = min(1.0, len(performance_samples) / expected)
             quality_values = [item.sample_quality for item in performance_samples]
             quality = coverage * (sum(quality_values) / len(quality_values) if quality_values else 0.0)
@@ -290,6 +488,7 @@ class GameplaySessionService:
                 scored.breakdown,
             )
             session.cumulative_score = cumulative
+            session.score_results[index] = result
             results.append(result)
             self._emit(session, "score.update", result.to_dict())
         return results
@@ -308,7 +507,7 @@ class GameplaySessionService:
         if target not in allowed[session.state]:
             raise ConflictError(f"cannot transition from {session.state.value} to {target.value}")
         session.state = target
-        self._emit(session, "session.snapshot", session.snapshot())
+        self._emit(session, "session.snapshot", self.snapshot(session.id))
 
     def _emit(self, session: GameSession, event: str, payload: dict[str, object]) -> None:
         session.event_sequence += 1

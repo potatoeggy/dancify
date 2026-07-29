@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from math import isfinite
 from typing import Any
 
 from flask_socketio import emit, join_room  # type: ignore[import-untyped]
@@ -33,8 +34,19 @@ def register_socket_events(service: GameplaySessionService) -> None:
 
     @guarded
     def calibration_observation(data: dict[str, Any]) -> dict[str, object]:
-        # Full guided calibration is submitted over REST; this event acknowledges timing samples.
-        return {"ok": True, "received": bool(data)}
+        server_receive = service.server_timestamp()
+        session_id = _session_id(data)
+        service.get(session_id)
+        client_send = _number(data.get("clientSend"), "clientSend")
+        server_send = service.server_timestamp()
+        observation: dict[str, object] = {
+            "clientSend": client_send,
+            "serverReceive": server_receive,
+            "serverSend": server_send,
+        }
+        # The client records clientReceive when this acknowledgement arrives,
+        # completing the four timestamps without inventing a server-side value.
+        return {"ok": True, **observation, "observation": observation}
 
     @guarded
     def playback_ready(data: dict[str, Any]) -> dict[str, object]:
@@ -49,7 +61,9 @@ def register_socket_events(service: GameplaySessionService) -> None:
 
     @guarded
     def abort(data: dict[str, Any]) -> dict[str, object]:
-        return {"ok": True, "session": service.abort(_session_id(data)).snapshot()}
+        session_id = _session_id(data)
+        service.abort(session_id)
+        return {"ok": True, "session": service.snapshot(session_id)}
 
     socketio.on_event("session.join", join, namespace="/gameplay")
     socketio.on_event("calibration.observation", calibration_observation, namespace="/gameplay")
@@ -63,3 +77,12 @@ def _session_id(data: dict[str, Any]) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("sessionID is required")
     return value
+
+
+def _number(value: Any, key: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{key} must be numeric")
+    result = float(value)
+    if not isfinite(result) or result < 0:
+        raise ValueError(f"{key} must be finite and non-negative")
+    return result

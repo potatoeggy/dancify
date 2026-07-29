@@ -1,8 +1,11 @@
+from pathlib import Path
 from typing import Any
 
+import pytest
 from conftest import performance_features
 from flask.testing import FlaskClient
 
+from dancify import create_app
 from dancify.extensions import db
 from dancify.models import SessionSummaryRecord
 
@@ -11,6 +14,18 @@ def create_routine(client: FlaskClient, payload: dict[str, Any]) -> str:
     response = client.post("/api/v1/routines", json=payload)
     assert response.status_code == 201
     return response.get_json()["routineID"]
+
+
+def test_relative_sqlite_database_uses_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///local.db"})
+
+    with app.app_context():
+        db.create_all()
+        db.engine.dispose()
+
+    assert app.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{tmp_path / 'local.db'}"
+    assert (tmp_path / "local.db").is_file()
 
 
 def test_routine_api_and_end_to_end_gameplay(
