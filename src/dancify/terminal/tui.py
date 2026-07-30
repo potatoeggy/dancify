@@ -22,7 +22,7 @@ from dancify.terminal.calibration import CalibrationStatus, GuidedCalibrator
 from dancify.terminal.capture import DSUCapture
 from dancify.terminal.config import ClientConfig
 from dancify.terminal.controller import DemoResult, HeadlessController, LiveStatus, SocketFactory
-from dancify.terminal.dto import Routine, Session, object_value
+from dancify.terminal.dto import Routine, Score, Session, object_value
 from dancify.terminal.errors import ClientError, ConfigurationError, GameplayAborted
 from dancify.terminal.playback import MpvJsonIpcPlayer, PlaybackMode, PlaybackPort
 from dancify.terminal.reducer import GameplayState
@@ -65,6 +65,33 @@ def _wrist_assignment(config: ClientConfig) -> str:
     if config.dsu_left_slot is None:
         return f"R{config.dsu_right_slot} (right-only)"
     return f"L{config.dsu_left_slot}/R{config.dsu_right_slot}"
+
+
+def score_cue(value: float, valid: bool) -> str:
+    """Return an accessible cue: PERFECT >= 90, GREAT >= 75, GOOD >= 50.
+
+    Lower valid scores receive KEEP GOING. Invalid windows always receive MISS,
+    regardless of their numeric value, because the backend reported no usable data.
+    """
+
+    if not valid:
+        return "MISS"
+    if value >= 90.0:
+        return "PERFECT"
+    if value >= 75.0:
+        return "GREAT"
+    if value >= 50.0:
+        return "GOOD"
+    return "KEEP GOING"
+
+
+def _score_feedback(score: Score) -> str:
+    cue = score_cue(score.value, score.valid)
+    no_data = " (no data)" if not score.valid else ""
+    return (
+        f"{cue}{no_data} · window {score.window_index} · score {score.value:.1f} "
+        f"· cumulative {score.cumulative_score:.1f}"
+    )
 
 
 class SetupScreen(Screen[None]):
@@ -328,7 +355,7 @@ class SetupScreen(Screen[None]):
             assert self.capture is not None
             self.cancel = asyncio.Event()
             self._live_active = True
-            self._printed_score_windows = {score.window_index for score in self.session.scores}
+            self._seed_score_history()
 
             async def update(status: LiveStatus) -> None:
                 self._render_live_status(status, duration)
@@ -400,6 +427,11 @@ class SetupScreen(Screen[None]):
             raise ValueError
         return value
 
+    def _seed_score_history(self) -> None:
+        self._printed_score_windows = (
+            set() if self.session is None else {score.window_index for score in self.session.scores}
+        )
+
     def _state(self, session: Session) -> None:
         self.query_one("#state", Static).update(
             f"State: {session.state.value} · window {session.current_window} · score {session.cumulative_score:.3f}"
@@ -428,15 +460,13 @@ class SetupScreen(Screen[None]):
                     for window_index in sorted(scores):
                         if window_index not in self._printed_score_windows:
                             score = scores[window_index]
-                            self._log(
-                                f"Score update · window {window_index}: {score.value:.3f} "
-                                f"· cumulative {score.cumulative_score:.3f}"
-                            )
+                            self._log(f"Score update · {_score_feedback(score)}")
                             self._printed_score_windows.add(window_index)
                     latest = scores[max(scores)]
-                    self.query_one("#live-score", Static).update(
-                        f"Score: {latest.value:.3f} · cumulative {latest.cumulative_score:.3f}"
-                    )
+                    score_widget = self.query_one("#live-score", Static)
+                    score_widget.set_class(latest.valid, "score-valid")
+                    score_widget.set_class(not latest.valid, "score-invalid")
+                    score_widget.update(_score_feedback(latest))
         accepted = status.accepted if status.accepted is not None else getattr(motion_health, "accepted", None)
         dropped = status.dropped if status.dropped is not None else getattr(motion_health, "dropped", None)
         health_label = "healthy" if status.capture_healthy is not False else "unhealthy"
@@ -525,6 +555,9 @@ class DancifyTerminalApp(App[None]):
     #setup, #results { padding: 1 2; }
     #title, #result-title { text-style: bold; margin-bottom: 1; }
     #status, #state, #device-health, #live-score { margin-top: 1; }
+    #live-score { border: round $accent; padding: 0 1; text-style: bold; height: 3; }
+    #live-score.score-valid { border: round $success; }
+    #live-score.score-invalid { border: round $error; }
     .fields { height: auto; }
     Input { width: 1fr; min-width: 20; }
     Button { margin-right: 1; }

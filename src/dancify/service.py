@@ -16,12 +16,11 @@ from dancify.calibration import (
     ClockObservation,
     SpatialCalibrationProfile,
     TimingCalibrationService,
-    resample_features,
 )
+from dancify.debug_scoring import WindowScoringEvaluator
 from dancify.domain import (
     GameSession,
     MotionFeatures,
-    MotionWindow,
     RawImuSample,
     RawMotionSample,
     ScoreResult,
@@ -140,6 +139,9 @@ class RoutineService:
     def windows(self, routine_id: str) -> list[dict[str, object]]:
         return [window.to_dict() for window in self.get_record(routine_id).windows]
 
+    def list(self, limit: int = 100) -> list[dict[str, object]]:
+        return [record.metadata_dict() for record in self._repository.list(limit)]
+
 
 class GameplaySessionService:
     def __init__(
@@ -151,6 +153,7 @@ class GameplaySessionService:
         clock: Callable[[], float] = monotonic,
         sample_rate_hz: int = 50,
         max_raw_batch: int = 1000,
+        window_evaluator: WindowScoringEvaluator | None = None,
     ) -> None:
         if sample_rate_hz <= 0 or max_raw_batch <= 0:
             raise ValueError("sample rate and raw batch limit must be positive")
@@ -159,7 +162,7 @@ class GameplaySessionService:
         self._publisher = publisher
         self._summaries = summaries or SessionSummaryRepository()
         self._clock = clock
-        self._sample_rate_hz = sample_rate_hz
+        self._window_evaluator = window_evaluator or WindowScoringEvaluator(sample_rate_hz)
         self._max_raw_batch = max_raw_batch
         self._sessions: dict[str, GameSession] = {}
         self._runtime: dict[str, SessionRuntime] = {}
@@ -464,39 +467,17 @@ class GameplaySessionService:
             session.current_window = index
             if not window_record.scoreable:
                 continue
-            reference_raw = tuple(
-                item
-                for item in reference_features(raw_reference, window_record.start_seconds, window_record.end_seconds)
-                if item.wrist in active_wrists
+            reference_raw = reference_features(raw_reference, window_record.start_seconds, window_record.end_seconds)
+            evaluation = self._window_evaluator.evaluate(
+                scorer=runtime.scorer,
+                index=index,
+                start_seconds=window_record.start_seconds,
+                end_seconds=window_record.end_seconds,
+                reference_features=reference_raw,
+                performance_features=tuple(runtime.performance),
+                active_wrists=frozenset(active_wrists),
             )
-            reference_samples = resample_features(
-                reference_raw, window_record.start_seconds, window_record.end_seconds, self._sample_rate_hz
-            )
-            performance_raw = tuple(
-                item
-                for item in runtime.performance
-                if item.wrist in active_wrists
-                and window_record.start_seconds <= item.synchronized_time < window_record.end_seconds
-            )
-            performance_samples = resample_features(
-                performance_raw, window_record.start_seconds, window_record.end_seconds, self._sample_rate_hz
-            )
-            expected = max(
-                1,
-                int((window_record.end_seconds - window_record.start_seconds) * self._sample_rate_hz)
-                * len(active_wrists),
-            )
-            coverage = min(1.0, len(performance_samples) / expected)
-            quality_values = [item.sample_quality for item in performance_samples]
-            quality = coverage * (sum(quality_values) / len(quality_values) if quality_values else 0.0)
-            valid = coverage >= 0.5
-            reference_window = MotionWindow(
-                index, window_record.start_seconds, window_record.end_seconds, reference_samples
-            )
-            performance_window = MotionWindow(
-                index, window_record.start_seconds, window_record.end_seconds, performance_samples, valid, quality
-            )
-            scored = runtime.scorer.score(reference_window, performance_window)
+            scored = evaluation.result
             cumulative = runtime.aggregator.add(scored.value)
             result = ScoreResult(
                 scored.window_index,

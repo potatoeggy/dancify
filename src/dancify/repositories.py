@@ -46,6 +46,12 @@ class RoutineRepository:
     def get(self, routine_id: str) -> DanceRoutineRecord | None:
         return db.session.get(DanceRoutineRecord, routine_id)
 
+    def list(self, limit: int = 100) -> list[DanceRoutineRecord]:
+        if not 1 <= limit <= 100:
+            raise ValueError("routine list limit must be between 1 and 100")
+        statement = db.select(DanceRoutineRecord).order_by(DanceRoutineRecord.created_at.desc()).limit(limit)
+        return list(db.session.scalars(statement))
+
 
 class SessionSummaryRepository:
     def save(self, session: GameSession) -> SessionSummaryRecord:

@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from textual.widgets import Log
+from textual.widgets import Log, Static
 
 from dancify.domain import RawImuSample, SessionState, Vector3, WristSide
 from dancify.terminal.calibration import CalibrationStatus, GuidedCalibrator
@@ -27,7 +27,7 @@ from dancify.terminal.errors import GameplayAborted, PlaybackError
 from dancify.terminal.reducer import GameplayState
 from dancify.terminal.rest import DancifyAPI
 from dancify.terminal.socket import GameplaySocket
-from dancify.terminal.tui import DancifyTerminalApp, SetupScreen
+from dancify.terminal.tui import DancifyTerminalApp, SetupScreen, score_cue
 
 
 def _session(state: SessionState = SessionState.READY, score: float = 0.0) -> Session:
@@ -486,6 +486,24 @@ def test_live_controller_concurrency_completion_abort_and_cleanup() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("value", "valid", "expected"),
+    [
+        (100.0, True, "PERFECT"),
+        (90.0, True, "PERFECT"),
+        (89.999, True, "GREAT"),
+        (75.0, True, "GREAT"),
+        (74.999, True, "GOOD"),
+        (50.0, True, "GOOD"),
+        (49.999, True, "KEEP GOING"),
+        (0.0, True, "KEEP GOING"),
+        (100.0, False, "MISS"),
+    ],
+)
+def test_score_cue_thresholds(value: float, valid: bool, expected: str) -> None:
+    assert score_cue(value, valid) == expected
+
+
 def test_textual_pilot_live_score_health_and_abort_rendering() -> None:
     async def scenario() -> None:
         app = DancifyTerminalApp(ClientConfig("http://test"))
@@ -497,18 +515,64 @@ def test_textual_pilot_live_score_health_and_abort_rendering() -> None:
             state.scores[0] = Score(0, 0.0, 93.25, 93.25, True)
             screen._render_live_status(
                 LiveStatus("playback", "Playing", 0.5, state, True, accepted=40, dropped=2),
-                1.0,
+                3.0,
             )
-            screen._render_live_status(LiveStatus("event", "score.update", 0.5, state, accepted=40, dropped=2), 1.0)
+            screen._render_live_status(LiveStatus("health", "Healthy", 0.5, state, accepted=40, dropped=2), 3.0)
+            state.scores[1] = Score(1, 1.0, 75.0, 84.125, True)
+            screen._render_live_status(LiveStatus("event", "score.update", 1.5, state), 3.0)
+            state.scores[2] = Score(2, 2.0, 100.0, 84.125, False)
+            screen._render_live_status(LiveStatus("event", "score.update", 2.5, state), 3.0)
+            screen._render_live_status(LiveStatus("playback", "Playing", 2.5, state, accepted=40, dropped=2), 3.0)
             await pilot.pause()
-            assert "93.250" in str(screen.query_one("#live-score").render())
+
+            score_widget = screen.query_one("#live-score", Static)
+            assert str(score_widget.render()) == ("MISS (no data) · window 2 · score 100.0 · cumulative 84.1")
+            assert score_widget.has_class("score-invalid")
+            assert not score_widget.has_class("score-valid")
             assert "accepted 40, dropped 2" in str(screen.query_one("#device-health").render())
             live_log = screen.query_one("#log", Log)
-            assert live_log.lines == ["Score update · window 0: 93.250 · cumulative 93.250"]
+            assert live_log.lines == [
+                "Score update · PERFECT · window 0 · score 93.2 · cumulative 93.2",
+                "Score update · GREAT · window 1 · score 75.0 · cumulative 84.1",
+                "Score update · MISS (no data) · window 2 · score 100.0 · cumulative 84.1",
+            ]
             await pilot.press("ctrl+x")
             await pilot.pause()
             assert screen.cancel.is_set()
             assert "stopped" in str(screen.query_one("#status").render())
+
+    asyncio.run(scenario())
+
+
+def test_resumed_score_history_is_displayed_but_not_announced() -> None:
+    async def scenario() -> None:
+        historical = Score(4, 4.0, 82.0, 82.0, True)
+        session = Session(
+            "s",
+            "r",
+            "p",
+            SessionState.PLAYING,
+            0.0,
+            4.5,
+            4,
+            82.0,
+            4,
+            scores=(historical,),
+        )
+        app = DancifyTerminalApp(ClientConfig("http://test"))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = cast(SetupScreen, app.screen)
+            screen.session = session
+            screen._seed_score_history()
+            state = GameplayState()
+            state.reconcile(session)
+            screen._render_live_status(LiveStatus("playback", "Resumed", 4.5, state), 5.0)
+            screen._render_live_status(LiveStatus("health", "Healthy", 4.5, state), 5.0)
+            await pilot.pause()
+
+            assert str(screen.query_one("#live-score").render()) == ("GREAT · window 4 · score 82.0 · cumulative 82.0")
+            assert screen.query_one("#log", Log).lines == []
 
     asyncio.run(scenario())
 

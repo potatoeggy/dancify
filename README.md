@@ -99,6 +99,24 @@ The routine importer accepts the ingestion repository's shape:
 }
 ```
 
+
+## Development-only MOCK scoring diagnostics
+
+The scoring diagnostics page is **disabled by default** and its routes do not exist unless it is explicitly enabled in a development process. Start a disposable local instance with both gates set:
+
+```bash
+export DANCIFY_ENVIRONMENT=development
+export DANCIFY_ENABLE_DEBUG_UI=true
+export DATABASE_URL=sqlite:///dancify.db
+uv run python -m dancify
+# Open http://127.0.0.1:5000/_dev/scoring/
+```
+
+Removing `DANCIFY_ENABLE_DEBUG_UI=true` restores the default 404 behavior. Values must be exactly `true` or `false`; enabling the page outside `development` fails startup. The page and its JSON endpoints additionally reject non-loopback clients, send no-store and restrictive browser security headers, cap request bodies, and accept only bounded scalar perturbation controls. **Do not expose or reverse-proxy `/_dev/scoring`**: a local proxy can make a remote client appear to originate from loopback. This is a developer tool, not an authenticated production feature.
+
+Import routines through the normal routine API first, then use the page to select a fixed scoring window. It plots honest camera-plane wrist acceleration-derived horizontal/vertical components and intensity. It does not reconstruct a person, pose, animation, or video. Each run is labeled **MOCK** and deterministically perturbs canonical post-calibration features (direction, intensity, timing, coverage, sample quality, and horizontal confidence), then invokes the same 50 Hz resampling, coverage/quality validity rule, and registered weighted-DTW scorer used by gameplay. Results include validity, coverage, quality, and direction/intensity/timing breakdowns. Attempts are stateless: the server creates no session or database row, while the browser retains at most 20 responses in the current tab.
+
+This page does not read physical controllers and is not live controller practice. DSU capture currently belongs to the terminal process, which performs bounded UDP ingestion, clock mapping, wrist assignment, and calibration before backend upload. The preferred next real-practice slice is a terminal `practice ROUTINE_ID --window N` mode reusing that pipeline and the shared window evaluator. A browser workflow would instead require a separately designed authenticated, random-token, loopback-only bridge with origin checks, lifecycle control, clock synchronization, and backpressure; bypassing the existing capture/calibration boundary would not be valid scoring.
 Nullable wrist values are accepted; timestamps must be finite, non-negative, and strictly increasing.
 
 Live calibration uses schema v2: the client records real four-timestamp Socket.IO clock exchanges and measured accelerometer poses independently for every configured wrist. The older unversioned shared-gesture shape remains accepted for deterministic compatibility.

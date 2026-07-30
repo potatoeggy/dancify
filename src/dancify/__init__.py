@@ -10,6 +10,8 @@ from flask import Flask, Response, jsonify
 from sqlalchemy.engine import make_url
 
 from dancify.api import api
+from dancify.debug_scoring import WindowScoringEvaluator
+from dancify.debug_ui import scoring_debug
 from dancify.environment import load_environment
 from dancify.extensions import db, socketio
 from dancify.scoring import ScorerRegistry, WeightedDtwScoringAlgorithm
@@ -28,6 +30,14 @@ def _positive_int_env(name: str, default: int) -> int:
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive integer")
     return value
+
+
+def _strict_bool(value: object, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value in {"true", "false"}:
+        return value == "true"
+    raise RuntimeError(f"{name} must be exactly true or false")
 
 
 def _database_uri(uri: str) -> str:
@@ -53,9 +63,17 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         JSON_SORT_KEYS=False,
         MAX_RAW_MOTION_BATCH=_positive_int_env("DANCIFY_MAX_RAW_MOTION_BATCH", 1000),
+        DANCIFY_ENVIRONMENT=os.getenv("DANCIFY_ENVIRONMENT", "production"),
+        DANCIFY_ENABLE_DEBUG_UI=os.getenv("DANCIFY_ENABLE_DEBUG_UI", "false"),
     )
     if config:
         app.config.update(config)  # pyright: ignore[reportUnknownMemberType]
+    debug_enabled = _strict_bool(cast(object, app.config["DANCIFY_ENABLE_DEBUG_UI"]), "DANCIFY_ENABLE_DEBUG_UI")
+    environment = cast(object, app.config["DANCIFY_ENVIRONMENT"])
+    if not isinstance(environment, str) or environment not in {"development", "production"}:
+        raise RuntimeError("DANCIFY_ENVIRONMENT must be exactly development or production")
+    if debug_enabled and environment != "development":
+        raise RuntimeError("DANCIFY_ENABLE_DEBUG_UI=true is allowed only in development")
     app.config["SQLALCHEMY_DATABASE_URI"] = _database_uri(cast(str, app.config["SQLALCHEMY_DATABASE_URI"]))
     db.init_app(app)
     socketio.init_app(app)
@@ -63,6 +81,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     routines = RoutineService()
     scorers = ScorerRegistry()
     scorers.register(WeightedDtwScoringAlgorithm())
+    window_evaluator = WindowScoringEvaluator()
 
     def publish(session_id: str, event: str, payload: dict[str, object]) -> None:
         socketio.emit(  # pyright: ignore[reportUnknownMemberType]
@@ -74,10 +93,15 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         scorers,
         publish,
         max_raw_batch=cast(int, app.config["MAX_RAW_MOTION_BATCH"]),
+        window_evaluator=window_evaluator,
     )
     app.extensions["routine_service"] = routines
     app.extensions["session_service"] = sessions
+    app.extensions["scorer_registry"] = scorers
+    app.extensions["window_scoring_evaluator"] = window_evaluator
     app.register_blueprint(api)
+    if debug_enabled:
+        app.register_blueprint(scoring_debug)
     register_socket_events(sessions)
 
     @app.get("/health")
