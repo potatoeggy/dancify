@@ -38,6 +38,9 @@ class FakeAPI:
     async def create_session(self, *_: str) -> Session:
         return Session("s", "r", "p", SessionState.CREATED, None, 0, 0, 0, 0)
 
+    async def retry(self, _: str) -> Session:
+        return Session("s-retry", "r", "p", SessionState.READY, None, 0, 0, 0, 0)
+
     async def abort(self, _: str) -> Session:
         return Session("s", "r", "p", SessionState.ABORTED, None, 0, 0, 0, 1)
 
@@ -79,6 +82,19 @@ def test_cli_help_doctor_and_show_commands(monkeypatch: Any, tmp_path: Any) -> N
     assert imported.exit_code == 0 and '"title": "Imported"' in imported.stdout
     created = runner.invoke(cli.app, ["session", "create", "r", "--player", "p"])
     assert created.exit_code == 0 and '"state": "created"' in created.stdout
+    retry_help = runner.invoke(cli.app, ["session", "retry", "--help"])
+    assert retry_help.exit_code == 0
+    assert "source must be aborted" in retry_help.stdout
+    assert "new session" in retry_help.stdout
+    assert "calibration is reused" in retry_help.stdout
+    assert "state, scores, and motion are clean" in retry_help.stdout
+    assert "returned ID" in retry_help.stdout
+    retried = runner.invoke(cli.app, ["session", "retry", "s"])
+    assert retried.exit_code == 0
+    retried_snapshot = json.loads(retried.stdout)
+    assert retried_snapshot["id"] == "s-retry"
+    assert retried_snapshot["id"] != "s"
+    assert retried_snapshot["state"] == "ready"
     aborted = runner.invoke(cli.app, ["session", "abort", "s"])
     assert aborted.exit_code == 0 and '"state": "aborted"' in aborted.stdout
 

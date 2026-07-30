@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from dancify.domain import SessionState, WristSide
@@ -73,6 +77,25 @@ def test_client_config_and_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DANCIFY_TIMEOUT", "bad")
     with pytest.raises(ConfigurationError, match="must be numeric"):
         ClientConfig.from_env()
+
+
+def test_client_config_loads_dotenv_with_safe_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "DANCIFY_URL=https://dotenv.example\nDANCIFY_TIMEOUT=4\nDANCIFY_DSU_LEFT_SLOT=2\nDANCIFY_DSU_RIGHT_SLOT=3\n"
+    )
+
+    with patch.dict(os.environ, {"DANCIFY_TIMEOUT": "6"}, clear=True):
+        dotenv = ClientConfig.from_env()
+        assert dotenv.base_url == "https://dotenv.example"
+        assert dotenv.timeout_seconds == 6
+        assert dotenv.capture_config.left_slot == 2
+        assert dotenv.capture_config.right_slot == 3
+
+        explicit = ClientConfig.from_env(base_url="http://explicit", dsu_left_slot=0, dsu_right_slot=1)
+        assert explicit.base_url == "http://explicit"
+        assert explicit.capture_config.left_slot == 0
+        assert explicit.capture_config.right_slot == 1
 
 
 def test_dtos_parse_backend_contract_and_reject_bad_values() -> None:

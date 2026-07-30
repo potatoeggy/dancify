@@ -16,6 +16,14 @@ Typed Flask/Socket.IO modular monolith for importing video-derived wrist motion,
 
 Requirements: Python 3.12–3.14, [`uv`](https://docs.astral.sh/uv/), and PostgreSQL for normal operation.
 
+Dancify automatically loads the nearest `.env` file found from the current working directory upward for the backend, Alembic, and terminal client. Copy the tracked template and edit it locally; `.env` itself is gitignored:
+
+```bash
+cp .env.example .env
+```
+
+Precedence is: explicit CLI or Flask configuration, existing process/container environment variables, `.env`, then built-in defaults. Dotenv loading never replaces a variable already exported by the shell or supplied by the container.
+
 ```bash
 uv sync --frozen --group dev
 docker compose up -d db
@@ -67,6 +75,9 @@ All application resources are under `/api/v1`; `GET /health` is also available f
 - `POST /api/v1/sessions/{sessionID}/motion/raw` (item-tolerant live configured-wrist batches)
 - `POST /api/v1/sessions/{sessionID}/progress`
 - `POST /api/v1/sessions/{sessionID}/abort`
+- `POST /api/v1/sessions/{sessionID}/retry`
+
+Retry requires an aborted source session and creates a new session with a different ID. Valid calibration is reused when available, but all gameplay state, scores, and motion are reset. Use the returned session ID—not the aborted source ID—for the next `dancify-client run` command.
 
 The routine importer accepts the ingestion repository's shape:
 
@@ -202,6 +213,12 @@ uv run dancify-client run SESSION_ID --duration 120 --player mpv \
 
 uv run dancify-client session show SESSION_ID
 uv run dancify-client session abort SESSION_ID
+
+# Safe recovery: the source must already be aborted. This creates a new session,
+# reuses valid calibration when available, and clears gameplay state, scores, and motion.
+uv run dancify-client session retry ABORTED_SESSION_ID
+uv run dancify-client run RETURNED_NEW_SESSION_ID --duration 120 --player mpv \
+  --media /path/to/dance.mp4 --delay 2
 ```
 
 mpv is honest and mandatory for live playback: it is preloaded paused through an isolated Unix JSON-IPC socket, launched with `shell=False`, and queried for real `time-pos`. The client does not silently fall back to a clock. Raw capture, bounded partial-acceptance uploads, progress heartbeats, Socket.IO score/health events, and cancellation run concurrently. Before the final completion heartbeat, pending raw samples are flushed; the final REST snapshot reconciles scores and state. Cleanup uses quit/terminate/kill fallbacks and is safe to call repeatedly.

@@ -96,6 +96,9 @@ class DancifyAPI:
         data = await self._request("POST", f"/sessions/{session_id}/progress", payload)
         return tuple(Score.from_dict(item) for item in _object_list(data, "scores", "score"))
 
+    async def retry(self, session_id: str) -> Session:
+        return Session.from_dict(await self._request("POST", f"/sessions/{session_id}/retry"))
+
     async def abort(self, session_id: str) -> Session:
         return Session.from_dict(await self._request("POST", f"/sessions/{session_id}/abort"))
 

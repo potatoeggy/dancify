@@ -8,7 +8,8 @@ from flask.testing import FlaskClient
 
 from dancify.calibration import ClockObservation
 from dancify.domain import WristSide
-from dancify.extensions import socketio
+from dancify.extensions import db, socketio
+from dancify.models import SessionSummaryRecord
 from dancify.service import GameplaySessionService
 
 
@@ -331,3 +332,173 @@ def test_scores_are_authoritative_in_rest_snapshot_and_socket_rejoin(
     assert rejoined["session"]["scores"] == scored
     assert rejoined["session"]["cumulative_score"] == scored[0]["cumulativeScore"]
     socket.disconnect(namespace="/gameplay")
+
+
+def test_retry_aborted_right_only_session_reuses_calibration_and_resets_runtime(
+    app: Flask,
+    client: FlaskClient,
+    routine_payload: dict[str, Any],
+    calibration_payload: dict[str, Any],
+) -> None:
+    session_id = _create_session(client, routine_payload)
+    assert (
+        client.post(
+            f"/api/v1/sessions/{session_id}/calibration",
+            json=_right_only_v2_calibration(calibration_payload),
+        ).status_code
+        == 200
+    )
+    start_at = client.post(f"/api/v1/sessions/{session_id}/start", json={"delaySeconds": 0}).get_json()["startAt"]
+    raw = client.post(
+        f"/api/v1/sessions/{session_id}/motion/raw",
+        json={
+            "samples": [
+                _raw("right", 7, 2_000_000, start_at + 0.1, [-1.0, 1.0, 1.0]),
+                {"packetNumber": 8},
+            ]
+        },
+    )
+    assert raw.status_code == 202
+    assert (raw.get_json()["accepted"], raw.get_json()["dropped"]) == (1, 1)
+    client.post(f"/api/v1/sessions/{session_id}/motion", json={"features": performance_features()})
+    scored = client.post(
+        f"/api/v1/sessions/{session_id}/progress",
+        json={"videoTime": 1.0, "serverTime": start_at + 1.0},
+    )
+    assert len(scored.get_json()["scores"]) == 1
+    assert client.post(f"/api/v1/sessions/{session_id}/abort").status_code == 200
+
+    service = cast(GameplaySessionService, app.extensions["session_service"])
+    source_runtime = service._runtime[session_id]
+    source_snapshot = deepcopy(client.get(f"/api/v1/sessions/{session_id}").get_json())
+    source_summary = db.session.get(SessionSummaryRecord, session_id)
+    assert source_summary is not None
+    persisted_before = (
+        source_summary.routine_id,
+        source_summary.player_id,
+        source_summary.terminal_state,
+        source_summary.cumulative_score,
+        source_summary.scored_windows,
+        source_summary.completed_at,
+    )
+
+    response = client.post(f"/api/v1/sessions/{session_id}/retry")
+    assert response.status_code == 201
+    retried = response.get_json()
+    retry_id = retried["id"]
+    assert retry_id != session_id
+    assert retried["state"] == "ready"
+    assert retried["routine_id"] == source_snapshot["routine_id"]
+    assert retried["player_id"] == source_snapshot["player_id"]
+    assert retried["calibrationVersion"] == 2
+    assert retried["activeWrists"] == ["right"]
+    assert retried["playback_start_time"] is None
+    assert retried["current_timestamp"] == 0.0
+    assert retried["current_window"] == 0
+    assert retried["cumulative_score"] == 0.0
+    assert retried["event_sequence"] == 0
+    assert retried["scores"] == []
+    assert retried["motionHealth"] == {
+        "accepted": 0,
+        "dropped": 0,
+        "malformed": 0,
+        "quality": 1.0,
+        "wrists": {
+            "left": {
+                "accepted": 0,
+                "dropped": 0,
+                "duplicates": 0,
+                "invalidTiming": 0,
+                "outOfOrder": 0,
+                "quality": 1.0,
+            },
+            "right": {
+                "accepted": 0,
+                "dropped": 0,
+                "duplicates": 0,
+                "invalidTiming": 0,
+                "outOfOrder": 0,
+                "quality": 1.0,
+            },
+        },
+    }
+
+    retry_runtime = service._runtime[retry_id]
+    retry_session = service.get(retry_id)
+    assert retry_session.scored_windows == set()
+    assert retry_session.score_results == {}
+    assert retry_runtime.scorer is source_runtime.scorer
+    assert retry_runtime.windowing is source_runtime.windowing
+    assert retry_runtime.clock_mapper is source_runtime.clock_mapper
+    assert retry_runtime.spatial_profiles is not source_runtime.spatial_profiles
+    assert set(retry_runtime.spatial_profiles) == {WristSide.RIGHT}
+    assert retry_runtime.spatial_profiles[WristSide.RIGHT] is source_runtime.spatial_profiles[WristSide.RIGHT]
+    assert retry_runtime.performance == []
+    assert retry_runtime.last_packet == {}
+    assert retry_runtime.malformed_samples == 0
+    assert retry_runtime.aggregator.total == 0.0
+    assert retry_runtime.aggregator.count == 0
+    for side in WristSide:
+        assert retry_runtime.capture_mappers[side] is not source_runtime.capture_mappers[side]
+        assert not retry_runtime.capture_mappers[side]._observations
+
+    assert client.get(f"/api/v1/sessions/{session_id}").get_json() == source_snapshot
+    persisted_after = db.session.get(SessionSummaryRecord, session_id)
+    assert persisted_after is not None
+    assert (
+        persisted_after.routine_id,
+        persisted_after.player_id,
+        persisted_after.terminal_state,
+        persisted_after.cumulative_score,
+        persisted_after.scored_windows,
+        persisted_after.completed_at,
+    ) == persisted_before
+    assert db.session.get(SessionSummaryRecord, retry_id) is None
+
+    assert client.post(f"/api/v1/sessions/{retry_id}/retry").status_code == 409
+    started = client.post(f"/api/v1/sessions/{retry_id}/start", json={"delaySeconds": 0})
+    assert started.status_code == 200
+    assert started.get_json()["startAt"] is not None
+
+
+def test_retry_conflicts_and_uncalibrated_and_two_wrist_compatibility(
+    app: Flask,
+    client: FlaskClient,
+    routine_payload: dict[str, Any],
+    calibration_payload: dict[str, Any],
+) -> None:
+    uncalibrated_id = _create_session(client, routine_payload)
+    assert client.post(f"/api/v1/sessions/{uncalibrated_id}/retry").status_code == 409
+    assert client.post(f"/api/v1/sessions/{uncalibrated_id}/abort").status_code == 200
+    early_retry = client.post(f"/api/v1/sessions/{uncalibrated_id}/retry")
+    assert early_retry.status_code == 201
+    early = early_retry.get_json()
+    assert early["state"] == "created"
+    assert early["calibrationVersion"] == 0
+    assert early["activeWrists"] == []
+    assert client.post(f"/api/v1/sessions/{early['id']}/start", json={"delaySeconds": 0}).status_code == 409
+
+    two_wrist_id = _create_session(client, routine_payload)
+    client.post(f"/api/v1/sessions/{two_wrist_id}/calibration", json=_v2_calibration(calibration_payload))
+    assert client.post(f"/api/v1/sessions/{two_wrist_id}/abort").status_code == 200
+    two_wrist_retry = client.post(f"/api/v1/sessions/{two_wrist_id}/retry")
+    assert two_wrist_retry.status_code == 201
+    two_wrist = two_wrist_retry.get_json()
+    assert two_wrist["state"] == "ready"
+    assert two_wrist["activeWrists"] == ["left", "right"]
+    service = cast(GameplaySessionService, app.extensions["session_service"])
+    for side in WristSide:
+        assert service.calibration_profile(two_wrist["id"], side) is service.calibration_profile(two_wrist_id, side)
+
+    completed_id = _create_session(client, routine_payload)
+    client.post(f"/api/v1/sessions/{completed_id}/calibration", json=calibration_payload)
+    completed_start = client.post(f"/api/v1/sessions/{completed_id}/start", json={"delaySeconds": 0}).get_json()[
+        "startAt"
+    ]
+    completed = client.post(
+        f"/api/v1/sessions/{completed_id}/progress",
+        json={"videoTime": 2.0, "serverTime": completed_start + 2.0},
+    )
+    assert completed.status_code == 200
+    assert client.get(f"/api/v1/sessions/{completed_id}").get_json()["state"] == "completed"
+    assert client.post(f"/api/v1/sessions/{completed_id}/retry").status_code == 409

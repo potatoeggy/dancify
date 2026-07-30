@@ -123,7 +123,12 @@ class MpvJsonIpcPlayer:
         self._writer: asyncio.StreamWriter | None = None
         self._request_id = 0
         self._duration: float | None = None
+        self._position = 0.0
         self._lock = asyncio.Lock()
+
+    @property
+    def media_duration(self) -> float | None:
+        return self._duration
 
     @property
     def command(self) -> tuple[str, ...]:
@@ -178,7 +183,7 @@ class MpvJsonIpcPlayer:
                     self._duration = float(duration)
                     break
                 except PlaybackError as exc:
-                    if "property unavailable" not in exc.message or monotonic() >= media_deadline:
+                    if not _property_unavailable(exc) or monotonic() >= media_deadline:
                         raise
                     await asyncio.sleep(0.02)
         except (TimeoutError, OSError, PlaybackError) as exc:
@@ -191,12 +196,27 @@ class MpvJsonIpcPlayer:
         await self._command("set_property", "pause", False)
 
     async def position(self) -> float:
-        value = await self._command("get_property", "time-pos")
+        try:
+            value = await self._command("get_property", "time-pos")
+        except PlaybackError as exc:
+            if not _property_unavailable(exc):
+                raise
+            try:
+                idle = await self._command("get_property", "idle-active")
+            except PlaybackError as idle_error:
+                if not _property_unavailable(idle_error):
+                    raise
+                idle = False
+            if idle is True and self._duration is not None:
+                self._position = self._duration
+            return self._position
         if value is None:
-            return self._duration or 0.0
+            self._position = self._duration or self._position
+            return self._position
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise PlaybackError("mpv returned a non-numeric time-pos")
-        return max(0.0, float(value))
+        self._position = max(0.0, float(value))
+        return self._position
 
     async def close(self) -> None:
         if self._writer is not None:
@@ -223,6 +243,7 @@ class MpvJsonIpcPlayer:
         self._temp_dir = None
         self._ipc_path = None
         self._duration = None
+        self._position = 0.0
 
     async def _command(self, *arguments: object) -> Any:
         if self._reader is None or self._writer is None:
@@ -249,3 +270,7 @@ class MpvJsonIpcPlayer:
                 if response.get("error") != "success":
                     raise PlaybackError(f"mpv command failed: {response.get('error', 'unknown error')}")
                 return response.get("data")
+
+
+def _property_unavailable(error: PlaybackError) -> bool:
+    return "property unavailable" in error.message.casefold()

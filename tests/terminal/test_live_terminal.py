@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from textual.widgets import Log
 
 from dancify.domain import RawImuSample, SessionState, Vector3, WristSide
 from dancify.terminal.calibration import CalibrationStatus, GuidedCalibrator
@@ -22,7 +23,7 @@ from dancify.terminal.dto import (
     Session,
     WristMotionHealth,
 )
-from dancify.terminal.errors import GameplayAborted
+from dancify.terminal.errors import GameplayAborted, PlaybackError
 from dancify.terminal.reducer import GameplayState
 from dancify.terminal.rest import DancifyAPI
 from dancify.terminal.socket import GameplaySocket
@@ -460,6 +461,28 @@ def test_live_controller_concurrency_completion_abort_and_cleanup() -> None:
         assert stale_api.aborts == 1
         assert stale_capture.stops == 1 and stale_player.closed == 1
 
+        mismatch_order: list[str] = []
+        mismatch_api = LiveAPI(mismatch_order)
+        mismatch_play = asyncio.Event()
+        mismatch_capture = LiveCapture(mismatch_play)
+
+        class ShortPlayer(LivePlayer):
+            @property
+            def media_duration(self) -> float:
+                return 0.5
+
+        mismatch_player = ShortPlayer(mismatch_play)
+
+        def mismatch_factory(_config: ClientConfig, _session: str, state: GameplayState) -> LiveConnection:
+            return LiveConnection(state, mismatch_api, mismatch_order)
+
+        with pytest.raises(PlaybackError, match="requested duration 1.000s exceeds media duration 0.500s"):
+            await HeadlessController(cast(Any, mismatch_api), ClientConfig("http://test"), mismatch_factory).run_live(
+                "s", 1.0, cast(Any, mismatch_capture), mismatch_player, delay_seconds=0
+            )
+        assert mismatch_player.prepared == 1 and mismatch_player.closed == 1
+        assert mismatch_capture.starts == 0 and mismatch_api.aborts == 1
+
     asyncio.run(scenario())
 
 
@@ -476,9 +499,12 @@ def test_textual_pilot_live_score_health_and_abort_rendering() -> None:
                 LiveStatus("playback", "Playing", 0.5, state, True, accepted=40, dropped=2),
                 1.0,
             )
+            screen._render_live_status(LiveStatus("event", "score.update", 0.5, state, accepted=40, dropped=2), 1.0)
             await pilot.pause()
             assert "93.250" in str(screen.query_one("#live-score").render())
             assert "accepted 40, dropped 2" in str(screen.query_one("#device-health").render())
+            live_log = screen.query_one("#log", Log)
+            assert live_log.lines == ["Score update · window 0: 93.250 · cumulative 93.250"]
             await pilot.press("ctrl+x")
             await pilot.pause()
             assert screen.cancel.is_set()

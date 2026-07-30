@@ -88,6 +88,7 @@ class SetupScreen(Screen[None]):
         self.capture: DSUCapture | None = None
         self.cancel = asyncio.Event()
         self._live_active = False
+        self._printed_score_windows: set[int] = set()
         self._active_workflow: asyncio.Task[None] | None = None
         self._workflow_pending = False
         self._abort_pending = False
@@ -327,6 +328,7 @@ class SetupScreen(Screen[None]):
             assert self.capture is not None
             self.cancel = asyncio.Event()
             self._live_active = True
+            self._printed_score_windows = {score.window_index for score in self.session.scores}
 
             async def update(status: LiveStatus) -> None:
                 self._render_live_status(status, duration)
@@ -423,6 +425,14 @@ class SetupScreen(Screen[None]):
                 self._state(status.state.session)
                 scores = status.state.scores
                 if scores:
+                    for window_index in sorted(scores):
+                        if window_index not in self._printed_score_windows:
+                            score = scores[window_index]
+                            self._log(
+                                f"Score update · window {window_index}: {score.value:.3f} "
+                                f"· cumulative {score.cumulative_score:.3f}"
+                            )
+                            self._printed_score_windows.add(window_index)
                     latest = scores[max(scores)]
                     self.query_one("#live-score", Static).update(
                         f"Score: {latest.value:.3f} · cumulative {latest.cumulative_score:.3f}"

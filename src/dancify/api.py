@@ -58,6 +58,12 @@ def get_session(session_id: str) -> Response:
     return jsonify(_sessions().snapshot(session_id))
 
 
+@api.post("/sessions/<session_id>/retry")
+def retry_session(session_id: str) -> tuple[Response, int]:
+    retried = _sessions().retry(session_id)
+    return jsonify(_sessions().snapshot(retried.id)), 201
+
+
 @api.post("/sessions/<session_id>/calibration")
 def calibrate(session_id: str) -> Response:
     data = require_mapping(request.get_json())

@@ -168,3 +168,35 @@ def test_mpv_json_ipc_and_cleanup(tmp_path: Path) -> None:
             await MpvJsonIpcPlayer(str(tmp_path / "missing.mp4")).prepare()
 
     asyncio.run(scenario())
+
+
+def test_mpv_position_tolerates_transient_and_eof_property_unavailability() -> None:
+    async def scenario() -> None:
+        class ScriptedPlayer(MpvJsonIpcPlayer):
+            def __init__(self) -> None:
+                super().__init__("unused")
+                self._duration = 2.0
+                self._time_responses: list[float | PlaybackError] = [
+                    PlaybackError("mpv command failed: property unavailable"),
+                    0.5,
+                    PlaybackError("mpv command failed: property unavailable"),
+                ]
+                self._idle_responses = iter((False, True))
+
+            async def _command(self, *arguments: object) -> Any:
+                if arguments == ("get_property", "time-pos"):
+                    response = self._time_responses.pop(0)
+                    if isinstance(response, PlaybackError):
+                        raise response
+                    return response
+                if arguments == ("get_property", "idle-active"):
+                    return next(self._idle_responses)
+                raise AssertionError(arguments)
+
+        player = ScriptedPlayer()
+        assert player.media_duration == 2.0
+        assert await player.position() == 0.0
+        assert await player.position() == 0.5
+        assert await player.position() == 2.0
+
+    asyncio.run(scenario())

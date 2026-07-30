@@ -174,6 +174,25 @@ class GameplaySessionService:
         self._runtime[session.id] = SessionRuntime(scorer)
         return session
 
+    def retry(self, session_id: str) -> GameSession:
+        """Clone an aborted session; retries without reusable calibration remain CREATED."""
+        source = self.get(session_id)
+        source_runtime = self._runtime[session_id]
+        with source_runtime.lock:
+            if source.state != SessionState.ABORTED:
+                raise ConflictError("only aborted sessions can be retried")
+            state = SessionState.READY if source_runtime.spatial_profiles else SessionState.CREATED
+            retried = GameSession(str(uuid4()), source.routine_id, source.player_id, state=state)
+            self._sessions[retried.id] = retried
+            self._runtime[retried.id] = SessionRuntime(
+                scorer=source_runtime.scorer,
+                windowing=source_runtime.windowing,
+                clock_mapper=source_runtime.clock_mapper,
+                spatial_profiles=dict(source_runtime.spatial_profiles),
+                calibration_version=source_runtime.calibration_version,
+            )
+            return retried
+
     def get(self, session_id: str) -> GameSession:
         try:
             return self._sessions[session_id]

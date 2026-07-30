@@ -7,7 +7,7 @@ import contextlib
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from math import ceil
+from math import ceil, isfinite
 from types import TracebackType
 from typing import Protocol, Self, cast
 
@@ -16,7 +16,7 @@ from dancify.terminal.capture import CaptureError, DSUCapture
 from dancify.terminal.config import ClientConfig
 from dancify.terminal.demo_data import calibration_payload, routine_payload
 from dancify.terminal.dto import ClockObservation, JsonObject, MotionHealth, RawUploadResult, Routine, Score, Session
-from dancify.terminal.errors import GameplayAborted
+from dancify.terminal.errors import GameplayAborted, PlaybackError
 from dancify.terminal.motion import (
     BoundedMotionUploader,
     GeneratedMotionSource,
@@ -139,6 +139,7 @@ class HeadlessController:
         primary_traceback: TracebackType | None = None
         try:
             await player.prepare()
+            media_duration = _media_duration(player, duration)
             await connection.__aenter__()
             await connection.ready(delay_seconds)
             uploader = BoundedMotionUploader(
@@ -152,7 +153,7 @@ class HeadlessController:
             interval = 1.0 / self._config.progress_hz
             last_position = -1.0
             while True:
-                position = min(duration, await player.position())
+                position = _playback_position(duration, media_duration, await player.position())
                 if position > last_position:
                     await connection.progress(position, None)
                     last_position = position
@@ -214,6 +215,7 @@ class HeadlessController:
         primary_traceback: TracebackType | None = None
         try:
             await player.prepare()
+            media_duration = _media_duration(player, duration)
             if not capture.running:
                 await capture.start()
             await _emit(
@@ -263,7 +265,7 @@ class HeadlessController:
                     await _wait_for_start(next_heartbeat, cancellation)
                     if cancellation.is_set():
                         raise GameplayAborted("gameplay aborted by operator")
-                    position = min(duration, await player.position())
+                    position = _playback_position(duration, media_duration, await player.position())
                     advanced = position > last_position
                     if position >= duration:
                         stop.set()
@@ -425,6 +427,31 @@ async def _cleanup_independently(actions: tuple[Callable[[], Awaitable[None]], .
         except BaseException as exc:
             failures.append(exc)
     return failures
+
+
+def _media_duration(player: PlaybackPort, requested_duration: float) -> float | None:
+    raw_duration: object = getattr(player, "media_duration", None)
+    if raw_duration is None:
+        return None
+    if isinstance(raw_duration, bool) or not isinstance(raw_duration, int | float):
+        raise PlaybackError("mpv returned an invalid media duration")
+    media_duration = float(raw_duration)
+    if not isfinite(media_duration) or media_duration <= 0:
+        raise PlaybackError("mpv returned an invalid media duration")
+    if requested_duration > media_duration + 0.05:
+        raise PlaybackError(
+            f"requested duration {requested_duration:.3f}s exceeds media duration {media_duration:.3f}s",
+            hint=f"Use --duration {media_duration:.3f} or choose a matching media file.",
+        )
+    return media_duration
+
+
+def _playback_position(requested_duration: float, media_duration: float | None, position: float) -> float:
+    if not isfinite(position):
+        raise PlaybackError("mpv returned a non-finite time-pos")
+    if media_duration is not None and requested_duration > media_duration and position >= media_duration - 0.05:
+        return requested_duration
+    return min(requested_duration, max(0.0, position))
 
 
 def _merge_failures(

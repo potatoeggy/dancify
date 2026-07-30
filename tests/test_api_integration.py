@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from conftest import performance_features
@@ -26,6 +28,22 @@ def test_relative_sqlite_database_uses_working_directory(tmp_path: Path, monkeyp
 
     assert app.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{tmp_path / 'local.db'}"
     assert (tmp_path / "local.db").is_file()
+
+
+def test_backend_loads_dotenv_with_safe_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "DATABASE_URL=sqlite:///dotenv.db\nDANCIFY_MAX_RAW_MOTION_BATCH=17\nSECRET_KEY=dotenv-secret\n"
+    )
+
+    with patch.dict(os.environ, {"SECRET_KEY": "process-secret"}, clear=True):
+        app = create_app({"TESTING": True})
+        assert app.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{tmp_path / 'dotenv.db'}"
+        assert app.config["MAX_RAW_MOTION_BATCH"] == 17
+        assert app.config["SECRET_KEY"] == "process-secret"
+
+        explicit = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///explicit.db"})
+        assert explicit.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{tmp_path / 'explicit.db'}"
 
 
 def test_routine_api_and_end_to_end_gameplay(

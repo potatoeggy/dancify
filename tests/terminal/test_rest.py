@@ -69,6 +69,8 @@ def response(request: httpx.Request) -> httpx.Response:
                 ]
             },
         )
+    if path.endswith("/sessions/s/retry") and request.method == "POST":
+        return httpx.Response(201, json={**session, "id": "s-retry", "state": "ready"})
     if path.endswith("/sessions/s/abort"):
         return httpx.Response(200, json={**session, "state": "aborted"})
     if path.endswith("/sessions/s"):
@@ -92,6 +94,9 @@ def test_all_rest_operations() -> None:
         features = [{"timestamp": 0.0}]
         assert await api.upload_motion("s", features) == 1
         assert (await api.progress("s", 1.0, 11.0))[0].value == 100
+        retried = await api.retry("s")
+        assert retried.id == "s-retry"
+        assert retried.state.value == "ready"
         assert (await api.abort("s")).state.value == "aborted"
         await api.close()
         await client.aclose()

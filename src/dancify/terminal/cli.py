@@ -224,6 +224,21 @@ def session_calibrate(
     _output(_run(operation()))
 
 
+@session_app.command("retry")
+def session_retry(ctx: typer.Context, session_id: str) -> None:
+    """Clone an aborted source session into a new session.
+
+    The source must be aborted. Valid calibration is reused when available, while
+    gameplay state, scores, and motion are clean. Use the returned ID for `run`.
+    """
+
+    async def operation() -> object:
+        async with DancifyAPI(_settings(ctx).config) as api:
+            return await api.retry(session_id)
+
+    _output(_run(operation()))
+
+
 @session_app.command("abort")
 def session_abort(ctx: typer.Context, session_id: str) -> None:
     """Abort a non-terminal session."""
