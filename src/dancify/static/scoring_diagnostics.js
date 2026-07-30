@@ -70,6 +70,13 @@ async function loadWindows() {
   }
 }
 
+function renderScoringConfig(config) {
+  const weights = `${config.directionWeight.toFixed(3)}/${config.magnitudeWeight.toFixed(3)}/${config.timingWeight.toFixed(3)}`;
+  const timingSource = config.sampleSynchronizedTiming ? "sample timestamps" : "normalized indices";
+  const coverageRamp = config.smoothCoverageRamp ? "smooth" : "linear legacy";
+  byID("scoring-config").textContent = `Active scoring (read-only): ${config.profile} profile · direction/magnitude/timing ${weights} · DTW radius ${config.sakoeChibaRadius} · timing grace/falloff ${(config.timingGraceSeconds * 1000).toFixed(0)}/${(config.timingFalloffSeconds * 1000).toFixed(0)} ms · timing path cost ${config.timingPathCostWeight.toFixed(3)} · valid/full coverage ${(config.minimumCoverage * 100).toFixed(0)}/${(config.fullCoverage * 100).toFixed(0)}% · coverage/sample floors ${(config.coverageQualityFloor * 100).toFixed(0)}/${(config.sampleQualityFloor * 100).toFixed(0)}% · coverage ramp ${coverageRamp} · sample rate ${config.sampleRateHz} Hz · resample gap ${(config.resampleMaxGapSeconds * 1000).toFixed(0)} ms · resampling timestamps ${config.resamplingTimestampMode} · timing source ${timingSource}. MOCK controls cannot change these settings.`;
+}
+
 async function loadReference() {
   const raw = byID("window").value;
   state.windowIndex = raw === "" ? null : Number(raw);
@@ -81,6 +88,7 @@ async function loadReference() {
     const body = await requestJSON(`${API}/routines/${encodeURIComponent(state.routineID)}/windows/${state.windowIndex}`);
     state.reference = body;
     byID("signal-meaning").textContent = body.signalMeaning;
+    renderScoringConfig(body.scoringConfig);
     renderWrists(body.availableWrists);
     renderPlots();
     renderSignalTable(body.referenceSignals);

@@ -7,7 +7,7 @@ import asyncio
 import json
 import shutil
 from collections.abc import Coroutine
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any
@@ -17,14 +17,14 @@ import typer
 from dancify.terminal.calibration import CalibrationStatus, GuidedCalibrator
 from dancify.terminal.capture import DSUCapture
 from dancify.terminal.config import ClientConfig
-from dancify.terminal.controller import HeadlessController
-from dancify.terminal.dto import object_value
+from dancify.terminal.controller import HeadlessController, LiveStatus
+from dancify.terminal.dto import Score, object_value
 from dancify.terminal.errors import ClientError, ConfigurationError, ExitCode
 from dancify.terminal.motion import GeneratedMotionSource, ListMotionSource
 from dancify.terminal.playback import MpvJsonIpcPlayer, PlaybackMode
 from dancify.terminal.rest import DancifyAPI
 from dancify.terminal.socket import GameplaySocket, probe_socket
-from dancify.terminal.tui import DancifyTerminalApp
+from dancify.terminal.tui import DancifyTerminalApp, score_cue
 
 app = typer.Typer(no_args_is_help=True, help="Operate Dancify over REST, Socket.IO, DSU, and mpv.")
 routine_app = typer.Typer(no_args_is_help=True, help="Import and inspect routines.")
@@ -41,6 +41,41 @@ class PlayerChoice(str, Enum):
 @dataclass(frozen=True, slots=True)
 class CLISettings:
     config: ClientConfig
+
+
+class _LiveScoreOutput:
+    def __init__(self) -> None:
+        self._printed_windows: set[int] = set()
+
+    def __call__(self, status: LiveStatus) -> None:
+        if status.state is None:
+            return
+        for window_index in sorted(status.state.scores):
+            if window_index in self._printed_windows:
+                continue
+            typer.echo(_score_line(status.state.scores[window_index]), err=True)
+            self._printed_windows.add(window_index)
+
+
+def _score_line(score: Score) -> str:
+    cue = score_cue(score.value, score.valid)
+    no_data = " (no data)" if not score.valid else ""
+    start = _score_time(score.window_start_seconds)
+    end = _score_time(score.window_start_seconds + 1.0)
+    breakdown = score.breakdown
+    if breakdown is None:
+        categories = "direction n/a | magnitude n/a | timing n/a | quality n/a"
+    else:
+        categories = (
+            f"direction {breakdown.direction:.0%} | magnitude {breakdown.magnitude:.0%} "
+            f"| timing {breakdown.timing:.0%} | quality {breakdown.quality:.0%}"
+        )
+    return f"[{start}-{end}] {cue}{no_data} {score.value:.1f} | {categories} | avg {score.cumulative_score:.1f}"
+
+
+def _score_time(seconds: float) -> str:
+    minutes, remaining = divmod(round(seconds), 60)
+    return f"{minutes:02d}:{remaining:02d}"
 
 
 @app.callback()
@@ -265,6 +300,7 @@ def run_command(
     """Run deterministic fixtures or real DSU capture with honest mpv timing."""
 
     settings = _settings(ctx)
+    score_output = _LiveScoreOutput()
     if deterministic and player is PlayerChoice.MPV:
         raise ConfigurationError("mpv cannot be combined with --deterministic")
     if not deterministic and player is not PlayerChoice.MPV:
@@ -283,6 +319,7 @@ def run_command(
                     source,
                     mode=PlaybackMode.DETERMINISTIC,
                     delay_seconds=0,
+                    update=score_output,
                 )
             if motion is not None:
                 raise ConfigurationError("--motion is only valid with --deterministic")
@@ -293,6 +330,7 @@ def run_command(
                 DSUCapture(settings.config.capture_config),
                 MpvJsonIpcPlayer(media, video=not audio_only),
                 delay_seconds=delay,
+                update=score_output,
             )
 
     _output(_run(operation()))
@@ -380,7 +418,11 @@ def _run[T](awaitable: Coroutine[Any, Any, T]) -> T:
 
 def _json_default(value: object) -> object:
     if is_dataclass(value) and not isinstance(value, type):
-        return asdict(value)
+        return {
+            item.name: getattr(value, item.name)
+            for item in fields(value)
+            if not (isinstance(value, Score) and item.name == "breakdown")
+        }
     if isinstance(value, Enum):
         return value.value
     raise TypeError(f"cannot serialize {type(value).__name__}")

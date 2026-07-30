@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from math import exp, hypot, isfinite
 
 from dancify.domain import MotionFeatures, RawImuSample, Vector3, WristSide
@@ -164,32 +165,48 @@ class SpatialCalibrationProfile:
         )
 
 
+class ResamplingMode(StrEnum):
+    """Choose emitted timestamps without changing target-grid sequence order."""
+
+    TARGET_GRID = "target_grid"
+    SOURCE_SAMPLE = "source_sample"
+
+
 def resample_features(
     samples: tuple[MotionFeatures, ...],
     start: float,
     end: float,
     rate_hz: int = 50,
     max_gap_seconds: float = 0.05,
+    timestamp_mode: ResamplingMode = ResamplingMode.TARGET_GRID,
 ) -> tuple[MotionFeatures, ...]:
     if rate_hz <= 0 or end <= start:
         raise ValueError("invalid resampling interval")
-    output: list[MotionFeatures] = []
-    for wrist in WristSide:
-        stream = sorted(
-            (sample for sample in samples if sample.wrist == wrist), key=lambda item: item.synchronized_time
+    streams = {
+        wrist: sorted(
+            (sample for sample in samples if sample.wrist == wrist),
+            key=lambda item: item.synchronized_time,
         )
-        if not stream:
-            continue
-        for step in range(int((end - start) * rate_hz)):
-            timestamp = start + step / rate_hz
-            nearest = min(stream, key=lambda item: abs(item.synchronized_time - timestamp))
-            gap = abs(nearest.synchronized_time - timestamp)
+        for wrist in WristSide
+    }
+    output: list[MotionFeatures] = []
+    for step in range(int((end - start) * rate_hz)):
+        target_timestamp = start + step / rate_hz
+        for wrist in WristSide:
+            stream = streams[wrist]
+            if not stream:
+                continue
+            nearest = min(stream, key=lambda item: abs(item.synchronized_time - target_timestamp))
+            gap = abs(nearest.synchronized_time - target_timestamp)
             if gap > max_gap_seconds:
                 continue
             quality = max(0.0, 1.0 - gap / max_gap_seconds)
+            emitted_timestamp = (
+                target_timestamp if timestamp_mode is ResamplingMode.TARGET_GRID else nearest.synchronized_time
+            )
             output.append(
                 MotionFeatures(
-                    timestamp,
+                    emitted_timestamp,
                     wrist,
                     nearest.vertical_direction,
                     nearest.horizontal_direction,
@@ -199,7 +216,7 @@ def resample_features(
                     min(nearest.sample_quality, quality),
                 )
             )
-    return tuple(sorted(output, key=lambda item: (item.synchronized_time, item.wrist.value)))
+    return tuple(output)
 
 
 def _mean(values: list[Vector3]) -> Vector3:

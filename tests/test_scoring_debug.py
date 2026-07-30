@@ -94,6 +94,7 @@ def test_list_select_and_reference_signal_contract(
     windows = debug_client.get(f"/_dev/scoring/api/routines/{routine_id}/windows")
     assert windows.status_code == 200
     assert windows.json["routine"] == {"routineID": routine_id, "title": "Second", "duration": 2.0}
+    assert windows.json["scoringConfig"]["profile"] == "generous"
     assert windows.json["windows"] == [
         {"index": 0, "startTime": 0.0, "endTime": 1.0, "scoreable": True},
         {"index": 1, "startTime": 1.0, "endTime": 2.0, "scoreable": True},
@@ -103,6 +104,10 @@ def test_list_select_and_reference_signal_contract(
     assert reference.status_code == 200
     body = reference.json
     assert body["sampleRateHz"] == 50
+    assert body["scoringConfig"] == debug_app.extensions["scoring_config"].to_dict()
+    assert body["scoringConfig"]["profile"] == "generous"
+    assert body["scoringConfig"]["minimumCoverage"] == pytest.approx(0.2)
+    assert body["scoringConfig"]["timingGraceSeconds"] == pytest.approx(0.15)
     assert body["availableWrists"] == ["left", "right"]
     assert "not pose" in body["signalMeaning"]
     assert len(body["referenceSignals"]["left"]) == 50
@@ -130,6 +135,7 @@ def test_attempts_are_bounded_typed_and_non_scoreable_windows_rejected(
 
     bad_payloads = [
         {"unknown": 1},
+        {"scoringConfig": {"profile": "strict"}},
         {"activeWrists": []},
         {"activeWrists": ["left", "left"]},
         {"activeWrists": ["unknown"]},
@@ -197,14 +203,23 @@ def test_mock_attempts_are_deterministic_and_better_than_perturbed_attempts(
     assert baseline.json["metrics"]["quality"] == pytest.approx(1.0)
     assert baseline.json["metrics"]["score"] > reversed_attempt.json["metrics"]["score"]
     assert reversed_attempt.json["metrics"]["breakdown"]["direction"] < 0.1
-    assert low_coverage.json["metrics"]["valid"] is False
-    assert low_coverage.json["metrics"]["coverage"] < 0.5
-    assert low_coverage.json["metrics"]["quality"] < low_coverage.json["metrics"]["coverage"]
+    assert low_coverage.json["metrics"]["valid"] is True
+    assert 0.35 <= low_coverage.json["metrics"]["coverage"] < 0.55
+    assert low_coverage.json["metrics"]["score"] > 0
+    assert low_coverage.json["metrics"]["meanSampleQuality"] <= 0.5
     assert right_only.json["activeWrists"] == ["right"]
     assert right_only.json["metrics"]["score"] > 99.0
 
     sessions = cast(GameplaySessionService, debug_app.extensions["session_service"])
     assert cast(Any, sessions)._window_evaluator is debug_app.extensions["window_scoring_evaluator"]
+    scorer = debug_app.extensions["weighted_dtw_scorer"]
+    registry = debug_app.extensions["scorer_registry"]
+    assert registry.get("weighted_dtw") is scorer
+    session = sessions.create(cast(str, routine["routineID"]), "diagnostics-object-check")
+    assert cast(Any, sessions)._runtime[session.id].scorer is scorer
+    sessions.abort(session.id)
+    retried = sessions.retry(session.id)
+    assert cast(Any, sessions)._runtime[retried.id].scorer is scorer
 
 
 def test_debug_html_and_local_assets_smoke(debug_client: FlaskClient) -> None:
@@ -216,11 +231,16 @@ def test_debug_html_and_local_assets_smoke(debug_client: FlaskClient) -> None:
     assert "does not read physical controllers" in text
     assert "cdn" not in text.lower()
     assert "Run MOCK attempt" in text
+    assert "Active scoring:" in text
+    assert "MOCK controls cannot change them" in text
 
     script = debug_client.get("/_dev/scoring/assets/scoring_diagnostics.js")
     stylesheet = debug_client.get("/_dev/scoring/assets/scoring_diagnostics.css")
     assert script.status_code == stylesheet.status_code == 200
     script_text = script.get_data(as_text=True)
+    scoring_config = debug_client.application.extensions["scoring_config"].to_dict()
+    for field in scoring_config:
+        assert f"config.{field}" in script_text
     assert "state.attempts.slice(0, 20)" in script_text
     assert "Solid = reference; dashed = selected MOCK attempt" in script_text
     assert "reference vs selected MOCK attempt" in script_text

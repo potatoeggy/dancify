@@ -90,6 +90,7 @@ class HeadlessController:
         *,
         mode: PlaybackMode,
         delay_seconds: float = 1.0,
+        update: LiveCallback | None = None,
     ) -> RunResult:
         """Run an already-calibrated feature session; used by explicit deterministic mode."""
 
@@ -117,7 +118,19 @@ class HeadlessController:
             )
             async for tick in timeline:
                 await connection.progress(tick.video_time, tick.server_time)
-        return await self._reconcile(session_id, state, accepted)
+                await _emit(update, LiveStatus("playback", "Playing", video_time=tick.video_time, state=state))
+        result = await self._reconcile(session_id, state, accepted)
+        await _emit(
+            update,
+            LiveStatus(
+                "complete",
+                "Final backend state reconciled",
+                video_time=result.session.current_timestamp,
+                state=state,
+                accepted=result.accepted_features,
+            ),
+        )
+        return result
 
     async def run_with_player(
         self,

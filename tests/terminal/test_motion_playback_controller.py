@@ -8,7 +8,7 @@ import pytest
 
 from dancify.domain import SessionState
 from dancify.terminal.config import ClientConfig
-from dancify.terminal.controller import HeadlessController
+from dancify.terminal.controller import HeadlessController, LiveStatus
 from dancify.terminal.dto import CalibrationResult, Routine, Score, Session
 from dancify.terminal.errors import PlaybackError
 from dancify.terminal.motion import BoundedMotionUploader, GeneratedMotionSource
@@ -104,9 +104,17 @@ def test_motion_uploader_timeline_and_controller() -> None:
             return connection
 
         controller = HeadlessController(cast(Any, api), ClientConfig("http://test"), factory)
-        result = await controller.run_session("s", 1.0, GeneratedMotionSource(1.0), mode=PlaybackMode.DETERMINISTIC)
+        statuses: list[LiveStatus] = []
+        result = await controller.run_session(
+            "s",
+            1.0,
+            GeneratedMotionSource(1.0),
+            mode=PlaybackMode.DETERMINISTIC,
+            update=statuses.append,
+        )
         assert result.session.state is SessionState.COMPLETED
         assert result.accepted_features == 100 and result.scores[0].value == 95
+        assert any(status.state is not None and status.state.scores for status in statuses)
         demo = await controller.demo(duration=2.0, mode=PlaybackMode.DETERMINISTIC)
         assert demo.routine.id == "r" and demo.run.accepted_features == 200
 

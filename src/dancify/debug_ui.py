@@ -15,7 +15,7 @@ from dancify.debug_scoring import WindowScoringEvaluator
 from dancify.domain import MotionFeatures, WristSide
 from dancify.ingestion import deserialize_reference, reference_features
 from dancify.models import DanceRoutineRecord, RoutineWindowRecord
-from dancify.scoring import ScorerRegistry
+from dancify.scoring import ScorerRegistry, ScoringConfig
 from dancify.service import NotFoundError, RoutineService
 
 DEBUG_MAX_BODY_BYTES = 4096
@@ -75,6 +75,10 @@ def _scorer_registry() -> ScorerRegistry:
     return cast(ScorerRegistry, current_app.extensions["scorer_registry"])
 
 
+def _scoring_config() -> ScoringConfig:
+    return cast(ScoringConfig, current_app.extensions["scoring_config"])
+
+
 @scoring_debug.before_request
 def protect_debug_routes() -> tuple[Response, int] | None:
     remote = request.remote_addr
@@ -130,6 +134,7 @@ def list_windows(routine_id: str) -> Response:
                 "duration": metadata["duration"],
             },
             "windows": _routines().windows(routine_id),
+            "scoringConfig": _scoring_config().to_dict(),
         }
     )
 
@@ -142,6 +147,7 @@ def reference_window(routine_id: str, window_index: int) -> Response:
             "routineID": routine_id,
             "window": context.window.to_dict(),
             "sampleRateHz": _evaluator().sample_rate_hz,
+            "scoringConfig": _scoring_config().to_dict(),
             "availableWrists": [side.value for side in WristSide if side in context.available_wrists],
             "signalMeaning": _SIGNAL_MEANING,
             "referenceSignals": _signals(context.reference_samples, context.window.start_seconds),
@@ -158,7 +164,13 @@ def score_attempt(routine_id: str, window_index: int) -> Response:
     _reject_unknown(data, {"activeWrists", "perturbation"}, "request")
     active_wrists = _active_wrists(data.get("activeWrists"), context.available_wrists)
     perturbation = _perturbation(data.get("perturbation", {}))
-    performance = _mock_performance(context.reference_samples, active_wrists, perturbation)
+    performance = _mock_performance(
+        context.reference_samples,
+        active_wrists,
+        perturbation,
+        context.window.start_seconds,
+        _evaluator().sample_rate_hz,
+    )
     evaluation = _evaluator().evaluate(
         scorer=_scorer_registry().get("weighted_dtw"),
         index=context.window.window_index,
@@ -181,6 +193,7 @@ def score_attempt(routine_id: str, window_index: int) -> Response:
                 "valid": result.valid,
                 "coverage": evaluation.coverage,
                 "quality": result.breakdown.quality,
+                "meanSampleQuality": evaluation.mean_sample_quality,
                 "breakdown": result.breakdown.to_dict(),
             },
             "performanceSignals": _signals(evaluation.performance.samples, context.window.start_seconds),
@@ -285,6 +298,8 @@ def _mock_performance(
     reference: tuple[MotionFeatures, ...],
     active_wrists: frozenset[WristSide],
     perturbation: Perturbation,
+    start_seconds: float,
+    sample_rate_hz: int,
 ) -> tuple[MotionFeatures, ...]:
     angle = radians(perturbation.direction_rotation_degrees)
     cosine = cos(angle)
@@ -295,11 +310,11 @@ def _mock_performance(
             continue
         stream = [item for item in reference if item.wrist is wrist]
         retained = floor(len(stream) * perturbation.capture_coverage + 1e-12)
-        for item in stream[:retained]:
+        for index, item in enumerate(stream[:retained]):
             horizontal = item.horizontal_direction or 0.0
             rotated_horizontal = horizontal * cosine - item.vertical_direction * sine
             rotated_vertical = horizontal * sine + item.vertical_direction * cosine
-            timestamp = item.synchronized_time + perturbation.time_shift_ms / 1000.0
+            timestamp = start_seconds + index / sample_rate_hz + perturbation.time_shift_ms / 1000.0
             if timestamp < 0:
                 continue
             shifted.append(

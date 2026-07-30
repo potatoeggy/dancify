@@ -3,11 +3,12 @@ import pytest
 from dancify.calibration import (
     AffineClockMapper,
     ClockObservation,
+    ResamplingMode,
     SpatialCalibrationProfile,
     TimingCalibrationService,
     resample_features,
 )
-from dancify.domain import RawImuSample, Vector3, WristSide
+from dancify.domain import MotionFeatures, RawImuSample, Vector3, WristSide
 from dancify.motion import CircularMotionBuffer, DeterministicMotionSimulator, SimulationConfig
 
 
@@ -54,3 +55,37 @@ def test_simulator_buffer_order_loss_and_bound() -> None:
     assert buffer.health.duplicates == 1
     assert buffer.health.estimated_loss >= 2
     assert len(buffer) <= len(samples)
+
+
+def test_resampling_timestamp_modes_preserve_target_grid_sequence_order() -> None:
+    def feature(timestamp: float, wrist: WristSide) -> MotionFeatures:
+        return MotionFeatures(timestamp, wrist, 1.0, 0.0, 1.0, 1.0, True)
+
+    samples = (
+        feature(0.029, WristSide.RIGHT),
+        feature(0.011, WristSide.LEFT),
+        feature(0.009, WristSide.RIGHT),
+        feature(0.031, WristSide.LEFT),
+    )
+    legacy = resample_features(samples, 0.0, 0.04, rate_hz=50, max_gap_seconds=0.02)
+    assert [(item.synchronized_time, item.wrist) for item in legacy] == [
+        (0.0, WristSide.LEFT),
+        (0.0, WristSide.RIGHT),
+        (0.02, WristSide.LEFT),
+        (0.02, WristSide.RIGHT),
+    ]
+
+    source_timing = resample_features(
+        samples,
+        0.0,
+        0.04,
+        rate_hz=50,
+        max_gap_seconds=0.02,
+        timestamp_mode=ResamplingMode.SOURCE_SAMPLE,
+    )
+    assert [(item.synchronized_time, item.wrist) for item in source_timing] == [
+        (0.011, WristSide.LEFT),
+        (0.009, WristSide.RIGHT),
+        (0.011, WristSide.LEFT),
+        (0.029, WristSide.RIGHT),
+    ]

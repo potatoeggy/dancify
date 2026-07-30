@@ -9,8 +9,9 @@ from typer.testing import CliRunner
 from dancify.domain import SessionState
 from dancify.terminal import cli
 from dancify.terminal.config import ClientConfig
-from dancify.terminal.controller import DemoResult, RunResult
-from dancify.terminal.dto import Routine, Score, Session
+from dancify.terminal.controller import DemoResult, LiveStatus, RunResult
+from dancify.terminal.dto import Routine, Score, ScoreBreakdown, Session
+from dancify.terminal.reducer import GameplayState
 from dancify.terminal.tui import DancifyTerminalApp, ResultsScreen, SetupScreen
 
 runner = CliRunner()
@@ -119,6 +120,48 @@ def result() -> DemoResult:
     session = Session("s", "r", "p", SessionState.COMPLETED, 0, 2, 1, 90, 5)
     score = Score(0, 0, 90, 90, True)
     return DemoResult(Routine("r", "Demo", "demo.mp4", 2, 30, 1), RunResult(session, 200, (score,)))
+
+
+def test_run_prints_live_score_breakdown_once_to_stderr(monkeypatch: Any) -> None:
+    class FakeRunController:
+        def __init__(self, *_: Any) -> None:
+            pass
+
+        async def _result(self, update: Any) -> RunResult:
+            score = Score(0, 0.0, 82.4, 82.4, True, ScoreBreakdown(0.91, 0.73, 0.8, 0.98))
+            state = GameplayState(scores={0: score})
+            status = LiveStatus("playback", "Playing", 1.0, state)
+            update(status)
+            update(status)
+            completed = Session("s", "r", "p", SessionState.COMPLETED, 0.0, 1.0, 0, 82.4, 3)
+            return RunResult(completed, 100, (score,))
+
+        async def run_session(self, *_: Any, update: Any, **__: Any) -> RunResult:
+            return await self._result(update)
+
+        async def run_live(self, *_: Any, update: Any, **__: Any) -> RunResult:
+            return await self._result(update)
+
+    monkeypatch.setattr(cli, "DancifyAPI", FakeAPI)
+    monkeypatch.setattr(cli, "HeadlessController", FakeRunController)
+    commands = (
+        ["run", "s", "--duration", "1", "--deterministic"],
+        ["run", "s", "--duration", "1", "--player", "mpv", "--media", "clip.mp4"],
+    )
+    for command in commands:
+        invocation = runner.invoke(cli.app, command)
+        assert invocation.exit_code == 0
+        assert invocation.stderr == (
+            "[00:00-00:01] GREAT 82.4 | direction 91% | magnitude 73% | timing 80% | quality 98% | avg 82.4\n"
+        )
+        payload = json.loads(invocation.stdout)
+        assert payload["scores"][0] == {
+            "cumulative_score": 82.4,
+            "valid": True,
+            "value": 82.4,
+            "window_index": 0,
+            "window_start_seconds": 0.0,
+        }
 
 
 def test_tui_setup_validation_and_results() -> None:

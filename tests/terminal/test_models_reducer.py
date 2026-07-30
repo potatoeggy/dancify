@@ -44,6 +44,12 @@ def score_payload(index: int = 0, value: float = 90.0) -> dict[str, object]:
         "windowScore": value,
         "cumulativeScore": value,
         "valid": True,
+        "accuracyBreakdown": {
+            "direction": 0.91,
+            "magnitude": 0.73,
+            "timing": 0.8,
+            "quality": 0.98,
+        },
     }
 
 
@@ -137,7 +143,14 @@ def test_dtos_parse_backend_contract_and_reject_bad_values() -> None:
                     "wrists": wrists,
                 }
             )
-    assert Score.from_dict(score_payload()).value == 90
+    score = Score.from_dict(score_payload())
+    assert score.value == 90
+    assert score.breakdown is not None and score.breakdown.magnitude == 0.73
+    legacy_score = score_payload()
+    legacy_score.pop("accuracyBreakdown")
+    assert Score.from_dict(legacy_score).breakdown is None
+    with pytest.raises(ProtocolError):
+        Score.from_dict({**score_payload(), "accuracyBreakdown": {"direction": "bad"}})
     with pytest.raises(ProtocolError):
         object_value([])
     with pytest.raises(ProtocolError):

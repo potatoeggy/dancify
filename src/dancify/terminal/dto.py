@@ -82,24 +82,49 @@ class RoutineWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class ScoreBreakdown:
+    direction: float
+    magnitude: float
+    timing: float
+    quality: float
+
+    @classmethod
+    def from_dict(cls, data: JsonObject) -> ScoreBreakdown:
+        return cls(
+            _float(data, "direction"),
+            _float(data, "magnitude"),
+            _float(data, "timing"),
+            _float(data, "quality"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Score:
     window_index: int
     window_start_seconds: float
     value: float
     cumulative_score: float
     valid: bool
+    breakdown: ScoreBreakdown | None = None
 
     @classmethod
     def from_dict(cls, data: JsonObject) -> Score:
         valid = data.get("valid")
         if not isinstance(valid, bool):
             raise ProtocolError("valid must be boolean")
+        raw_breakdown = data.get("accuracyBreakdown")
+        breakdown = (
+            None
+            if raw_breakdown is None
+            else ScoreBreakdown.from_dict(object_value(raw_breakdown, "accuracy breakdown"))
+        )
         return cls(
             _int(data, "windowIndex"),
             _float(data, "windowStartSeconds"),
             _float(data, "windowScore"),
             _float(data, "cumulativeScore"),
             valid,
+            breakdown,
         )
 
 
