@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dancify MOCK scoring diagnostics</title>
+  <link rel="stylesheet" href="{{ url_for('scoring_debug.static', filename='scoring_diagnostics.css') }}">
+  <script type="module" src="{{ url_for('scoring_debug.static', filename='scoring_diagnostics.js') }}"></script>
+</head>
+<body>
+  <header>
+    <p class="banner"><strong>Development-only MOCK diagnostics.</strong> This visualizes wrist acceleration-derived signals; it is not a human pose, animation, or video reconstruction, and it does not read physical controllers.</p>
+    <h1>Dancify MOCK scoring diagnostics</h1>
+    <p>Compare deterministic synthetic attempts at the canonical post-calibration feature boundary using the production resampling and weighted-DTW scorer.</p>
+  </header>
+  <main>
+    <section aria-labelledby="selection-heading">
+      <h2 id="selection-heading">1. Select reference window</h2>
+      <div class="controls two-column">
+        <label>Routine <select id="routine"><option value="">Loading routines…</option></select></label>
+        <label>Window <select id="window" disabled><option value="">Select a routine</option></select></label>
+      </div>
+      <p id="signal-meaning" class="notice">Reference wrist signal: camera-plane horizontal/vertical acceleration direction and intensity. No pose is reconstructed.</p>
+      <div id="plots" aria-live="polite"></div>
+      <details>
+        <summary>Text fallback for reference signals</summary>
+        <div id="signal-table"></div>
+      </details>
+    </section>
+
+    <section aria-labelledby="attempt-heading">
+      <h2 id="attempt-heading">2. Configure MOCK attempt</h2>
+      <form id="attempt-form">
+        <fieldset>
+          <legend>Active reference wrists</legend>
+          <div id="wrists">Select a scoreable window.</div>
+        </fieldset>
+        <div id="perturbations" class="parameter-grid">
+          <label>Direction rotation (degrees)<input id="directionRotationDegrees" name="directionRotationDegrees" type="range" min="-180" max="180" step="1" value="0"><input aria-label="Direction rotation numeric value" data-for="directionRotationDegrees" type="number" min="-180" max="180" step="1" value="0"></label>
+          <label>Intensity scale<input id="intensityScale" name="intensityScale" type="range" min="0" max="2" step="0.05" value="1"><input aria-label="Intensity scale numeric value" data-for="intensityScale" type="number" min="0" max="2" step="0.05" value="1"></label>
+          <label>Time shift (milliseconds)<input id="timeShiftMs" name="timeShiftMs" type="range" min="-500" max="500" step="10" value="0"><input aria-label="Time shift numeric value" data-for="timeShiftMs" type="number" min="-500" max="500" step="10" value="0"></label>
+          <label>Capture coverage<input id="captureCoverage" name="captureCoverage" type="range" min="0" max="1" step="0.01" value="1"><input aria-label="Capture coverage numeric value" data-for="captureCoverage" type="number" min="0" max="1" step="0.01" value="1"></label>
+          <label>Sample quality<input id="sampleQuality" name="sampleQuality" type="range" min="0" max="1" step="0.01" value="1"><input aria-label="Sample quality numeric value" data-for="sampleQuality" type="number" min="0" max="1" step="0.01" value="1"></label>
+          <label>Horizontal confidence<input id="horizontalConfidence" name="horizontalConfidence" type="range" min="0" max="1" step="0.01" value="1"><input aria-label="Horizontal confidence numeric value" data-for="horizontalConfidence" type="number" min="0" max="1" step="0.01" value="1"></label>
+        </div>
+        <div class="actions">
+          <button id="run" type="submit" disabled>Run MOCK attempt</button>
+          <button id="reset" type="button">Reset baseline</button>
+          <button id="clear" type="button">Clear attempts</button>
+        </div>
+      </form>
+      <p id="status" role="status" aria-live="polite">Choose a routine and scoreable window.</p>
+      <div id="metrics" class="metrics" aria-live="polite"></div>
+    </section>
+
+    <section aria-labelledby="history-heading">
+      <h2 id="history-heading">3. Compare MOCK attempts</h2>
+      <p>Attempts are not persisted; at most 20 remain in this browser tab.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Attempt</th><th>Score</th><th>Valid</th><th>Coverage</th><th>Quality</th><th>Direction</th><th>Intensity</th><th>Timing</th></tr></thead>
+          <tbody id="history"><tr><td colspan="8">No MOCK attempts yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

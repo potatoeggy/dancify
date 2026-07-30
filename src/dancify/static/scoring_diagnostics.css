@@ -1,0 +1,55 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.45;
+  --accent: #3976d9;
+  --horizontal: #c84b31;
+  --vertical: #3976d9;
+  --intensity: #238b57;
+  --panel: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+  --border: color-mix(in srgb, CanvasText 25%, Canvas 75%);
+}
+
+body { margin: 0; background: Canvas; color: CanvasText; }
+header, main { max-width: 1100px; margin: auto; padding: 1rem; }
+.banner { border: 2px solid #b66a00; background: #fff0c7; color: #321f00; padding: .8rem; }
+section { border: 1px solid var(--border); border-radius: .5rem; padding: 1rem; margin: 1rem 0; background: var(--panel); }
+h1, h2, h3 { line-height: 1.15; }
+.controls, .parameter-grid { display: grid; gap: 1rem; }
+.two-column { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.parameter-grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+label { display: grid; gap: .35rem; font-weight: 650; }
+.parameter-grid label { grid-template-columns: 1fr 5rem; align-items: center; }
+.parameter-grid label input[type="range"] { grid-column: 1; width: 100%; }
+.parameter-grid label input[type="number"] { grid-column: 2; grid-row: 1 / span 2; width: 4.5rem; }
+select, input, button { font: inherit; padding: .45rem; }
+fieldset { margin-bottom: 1rem; }
+#wirsts label, #wrists label { display: inline-flex; margin-right: 1rem; align-items: center; }
+.actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1rem; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+.notice { font-weight: 600; }
+.plot { margin: 1rem 0; }
+.plot svg { width: 100%; height: 260px; border: 1px solid var(--border); background: Canvas; }
+.plot .axis { stroke: var(--border); stroke-width: 1; }
+.plot .reference-horizontal { fill: none; stroke: var(--horizontal); stroke-width: 2; }
+.plot .reference-vertical { fill: none; stroke: var(--vertical); stroke-width: 2; }
+.plot .reference-intensity { fill: none; stroke: var(--intensity); stroke-width: 2; }
+.plot .performance-horizontal, .plot .performance-vertical, .plot .performance-intensity { fill: none; stroke-width: 2; stroke-dasharray: 6 4; opacity: .8; }
+.plot .performance-horizontal { stroke: var(--horizontal); }
+.plot .performance-vertical { stroke: var(--vertical); }
+.plot .performance-intensity { stroke: var(--intensity); }
+.legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: .9rem; }
+.legend span::before { content: "—"; margin-right: .25rem; font-weight: 900; }
+.legend .horizontal { color: var(--horizontal); }
+.legend .vertical { color: var(--vertical); }
+.legend .intensity { color: var(--intensity); }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: .5rem; }
+.metric { border-left: 4px solid var(--accent); padding: .5rem; background: Canvas; }
+.metric strong { display: block; font-size: 1.25rem; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: .5rem; border-bottom: 1px solid var(--border); }
+tbody button { padding: .2rem .4rem; }
+.error { color: #b42318; font-weight: 700; }
+@media (max-width: 600px) { .parameter-grid label { grid-template-columns: 1fr 4.5rem; } }
